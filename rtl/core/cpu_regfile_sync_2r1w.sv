@@ -20,18 +20,10 @@
 *
 */
 
-`ifndef __REGFILE_SYNC_1R1W__
-`define __REGFILE_SYNC_1R1W__
+`ifndef __REGFILE_SYNC_2R1W__
+`define __REGFILE_SYNC_2R1W__
 
-`ifdef VIVADO
- `include "packages/pck_regfile.sv"
-`else
- `include "core/packages/pck_regfile.sv"
-`endif
-
-module cpu_regfile_sync_1r1w
-  import pck_regfile::*;
-#(
+module cpu_regfile_sync_2r1w #(
   parameter p_half_regfile = 0    //! reduce the register count to 16
 )(
   input  logic        i_clk,      //! global clock
@@ -39,8 +31,11 @@ module cpu_regfile_sync_1r1w
   output logic        o_busy,     //! regfile is busy
   output logic        o_addr_oob, //! address out of bounds
 
-  input  logic [ 4:0] i_rd_addr,  //! regfile read address
-  output logic [31:0] o_rd_data,  //! regfile read data 
+  input  logic [ 4:0] i_rd1_addr, //! regfile read address for port 1
+  output logic [31:0] o_rd1_data, //! regfile read data for port 1
+
+  input  logic [ 4:0] i_rd2_addr, //! regfile read address for port 2
+  output logic [31:0] o_rd2_data, //! regfile read data for port 2
 
   input  logic        i_wr_en,    //! regfile write enable
   input  logic [ 4:0] i_wr_addr,  //! regfile write address
@@ -48,7 +43,8 @@ module cpu_regfile_sync_1r1w
 );
 
   logic [ 4:0] wr_addr;
-  logic [ 4:0] rd_addr;
+  logic [ 4:0] rd1_addr;
+  logic [ 4:0] rd2_addr;
   logic        wr_en;
 
   localparam depth = (p_half_regfile) ? 15 : 31;
@@ -62,14 +58,16 @@ module cpu_regfile_sync_1r1w
     if (p_half_regfile) begin
       // check for out of bound exception
       always_comb begin
-        wr_addr    = { 1'b0, i_wr_addr[3:0] };
-        rd_addr    = { 1'b0, i_rd_addr[3:0] };
-        o_addr_oob = i_wr_addr[4] | i_rd_addr[4];
+        wr_addr    = { 1'b0, i_wr_addr [3:0] };
+        rd1_addr   = { 1'b0, i_rd1_addr[3:0] };
+        rd2_addr   = { 1'b0, i_rd2_addr[3:0] };
+        o_addr_oob = i_wr_addr[4] | i_rd1_addr[4] | i_rd2_addr[4];
       end
     end else begin
       always_comb begin
         wr_addr    = i_wr_addr;
-        rd_addr    = i_rd_addr;
+        rd1_addr   = i_rd1_addr;
+        rd2_addr   = i_rd2_addr;
         o_addr_oob = 1'b0;
       end
     end
@@ -81,18 +79,22 @@ module cpu_regfile_sync_1r1w
   always_ff @(posedge i_clk) begin: write
     /*if (i_rst) begin
       regs[0] <= 32'b0;
-    end else*/ if (wr_en) begin
+    end else */if (wr_en) begin
       regs[wr_addr] <= i_wr_data;
     end
   end
 
-  //! regfile synchronous read port
-  always_ff @(posedge i_clk) begin: read
-    o_rd_data <= (rd_addr == 5'd0) ? 32'd0 : regs[rd_addr];
+  //! regfile synchronous read ports
+  always_ff @(posedge i_clk) begin: read1
+    o_rd1_data <= (rd1_addr == 5'd0) ? 32'd0 : regs[rd1_addr];
+  end 
+
+  always_ff @(posedge i_clk) begin: read2
+    o_rd2_data <= (rd2_addr == 5'd0) ? 32'd0 : regs[rd2_addr];
   end 
 
   assign o_busy = 1'b0;
   
 endmodule
 
-`endif // __REGFILE_SYNC_1R1W__
+`endif // __REGFILE_SYNC_2R1W__

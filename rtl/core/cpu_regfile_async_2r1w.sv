@@ -20,17 +20,10 @@
 *
 */
 
-`ifndef __REGFILE_SYNC_2R1W__
-`define __REGFILE_SYNC_2R1W__
+`ifndef __REGFILE_ASYNC_2R1W__
+`define __REGFILE_ASYNC_2R1W__
 
-`ifdef VIVADO
- `include "packages/pck_regfile.sv"
-`else
- `include "core/packages/pck_regfile.sv"
-`endif
-module cpu_regfile_sync_2r1w
-  import pck_regfile::*;
-#(
+module cpu_regfile_async_2r1w #(
   parameter p_half_regfile = 0    //! reduce the register count to 16
 )(
   input  logic        i_clk,      //! global clock
@@ -59,7 +52,7 @@ module cpu_regfile_sync_2r1w
    // using a distributed regfile increases max frequency but also area
   (* ram_style = "distributed" *)
   logic [31:0] regs [0:depth];
-  //regfile_t rf;
+  //regfile_t    rf;
 
   generate
     if (p_half_regfile) begin
@@ -86,22 +79,20 @@ module cpu_regfile_sync_2r1w
   always_ff @(posedge i_clk) begin: write
     /*if (i_rst) begin
       regs[0] <= 32'b0;
-    end else */if (wr_en) begin
+    end else*/ if (wr_en) begin
       regs[wr_addr] <= i_wr_data;
     end
   end
 
-  //! regfile synchronous read ports
-  always_ff @(posedge i_clk) begin: read1
-    o_rd1_data <= (rd1_addr == 5'd0) ? 32'd0 : regs[rd1_addr];
-  end 
-
-  always_ff @(posedge i_clk) begin: read2
-    o_rd2_data <= (rd2_addr == 5'd0) ? 32'd0 : regs[rd2_addr];
+  //! regfile asynchronous read ports
+  always_comb begin: read
+    // output hardwired zero if addr=0
+    o_rd1_data = (rd1_addr == 5'd0) ? 32'd0 : regs[rd1_addr];
+    o_rd2_data = (rd2_addr == 5'd0) ? 32'd0 : regs[rd2_addr];
   end 
 
   assign o_busy = 1'b0;
-  
+
 endmodule
 
-`endif // __REGFILE_SYNC_2R1W__
+`endif // __REGFILE_ASYNC_2R1W__
