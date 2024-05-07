@@ -26,6 +26,7 @@
 `ifndef __SOC_SP_RAM__
 `define __SOC_SP_RAM__
 
+/*verilator public_on*/
 module soc_sp_ram #(
   parameter p_addr_base = 32'h10000000,
   parameter p_addr_mask = 32'hfffff000,
@@ -46,7 +47,7 @@ module soc_sp_ram #(
   output wire         o_ack       //! transfer acknowledge
 );
 
-  logic [31:0] mem [0:2**p_depth_pw2-1]; //! memory declaration
+  logic [31:0] mem_content [0:2**p_depth_pw2-1] /*verilator public*/; //! memory declaration
 
   logic [31:0] rd_data;
 
@@ -56,19 +57,31 @@ module soc_sp_ram #(
   assign masked_addr = i_addr & ~p_addr_mask[31:2];
   assign addr        = masked_addr[p_depth_pw2-1+2:2];
 
+  `ifdef verilator
+    function [31:0] get_mem_content (int index);
+      // verilator public
+      get_mem_content = mem_content[index];
+    endfunction
+
+    function [31:0] set_mem_content (int index, [31:0] data);
+      // verilator public
+      mem_content[index] = data;
+    endfunction
+  `endif
+
   always_ff @(posedge i_clk) begin: write_port
     if (i_rst) begin
       rd_data <= 32'd0;
     end else begin
       if (i_wr_en) begin
-        if (i_be[0]) mem[addr][ 7: 0] <= i_wr_data[ 7: 0];
-        if (i_be[1]) mem[addr][15: 8] <= i_wr_data[15: 8];
-        if (i_be[2]) mem[addr][23:16] <= i_wr_data[23:16];
-        if (i_be[3]) mem[addr][31:24] <= i_wr_data[31:24];
+        if (i_be[0]) mem_content[addr][ 7: 0] <= i_wr_data[ 7: 0];
+        if (i_be[1]) mem_content[addr][15: 8] <= i_wr_data[15: 8];
+        if (i_be[2]) mem_content[addr][23:16] <= i_wr_data[23:16];
+        if (i_be[3]) mem_content[addr][31:24] <= i_wr_data[31:24];
         rd_data <= rd_data;
       end else begin
         if (i_rd_en) begin
-          rd_data <= mem[addr];
+          rd_data <= mem_content[addr];
         end else begin
           rd_data <= rd_data;
         end
@@ -82,5 +95,6 @@ module soc_sp_ram #(
   assign o_ack = i_wr_en | i_rd_en;
 
 endmodule
+/*verilator public_off*/
 
 `endif // __SOC_SP_RAM__
