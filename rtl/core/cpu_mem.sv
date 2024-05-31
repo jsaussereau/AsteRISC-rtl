@@ -220,25 +220,24 @@ module cpu_mem
 
 `ifdef verilator
 
-  function [31:2] get_dbus_addr();
+  function logic get_dbus_wr_en();
     // verilator public
-    logic [31:2] data;
-    if (dbus_wr_en) begin
-      data = dbus_addr;
-    end else begin
-      data = 32'b0;
-    end
-    get_mem_addr = addr;
+    get_dbus_wr_en = dbus_wr_en;
   endfunction
 
-  function [31:0] get_bus_wr_data();
+  function [31:2] get_dbus_addr();
     // verilator public
-    get_mem_wr_data = dbus_wr_data;
+    get_dbus_addr = dbus_addr;
+  endfunction
+
+  function [31:0] get_dbus_wr_data();
+    // verilator public
+    get_dbus_wr_data = dbus_wr_data;
   endfunction
 
   function [31:0] get_dbus_rd_data();
     // verilator public
-    get_mem_rd_data = masked_rd_data;
+    get_dbus_rd_data = masked_rd_data;
   endfunction
 `endif
 

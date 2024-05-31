@@ -76,7 +76,7 @@ module soc_sp_ram #(
       end else begin
         data = 32'b0;
       end
-      get_mem_addr = addr;
+      get_mem_addr = data;
     endfunction
 
     function [31:0] get_mem_wr_data();
