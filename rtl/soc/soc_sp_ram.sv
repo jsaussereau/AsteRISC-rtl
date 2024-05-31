@@ -58,14 +58,35 @@ module soc_sp_ram #(
   assign addr        = masked_addr[p_depth_pw2-1+2:2];
 
   `ifdef verilator
-    function [31:0] get_mem_content (int index);
+    function [31:0] get_mem_content(int index);
       // verilator public
       get_mem_content = mem_content[index];
     endfunction
 
-    function [31:0] set_mem_content (int index, [31:0] data);
+    function [31:0] set_mem_content(int index, [31:0] data);
       // verilator public
       mem_content[index] = data;
+    endfunction
+
+    function [31:2] get_mem_addr();
+      // verilator public
+      logic [31:2] data;
+      if (i_wr_en) begin
+        data = addr;
+      end else begin
+        data = 32'b0;
+      end
+      get_mem_addr = addr;
+    endfunction
+
+    function [31:0] get_mem_wr_data();
+      // verilator public
+      get_mem_wr_data = i_wr_data;
+    endfunction
+
+    function [31:0] get_mem_rd_data();
+      // verilator public
+      get_mem_rd_data = rd_data;
     endfunction
   `endif
 

@@ -70,6 +70,7 @@ module cpu_mem
   logic [31: 0] rd_data;
   logic [31: 0] aligned_wr_data;
   logic [31: 0] aligned_rd_data;
+  logic [31: 0] masked_rd_data;
   logic [ 3: 0] be;
 
   logic         saved_swap_bytes;
@@ -187,33 +188,59 @@ module cpu_mem
     if (!saved_swap_bytes) begin
       if (saved_dmem_sext) begin // sign extension
         case (saved_sel_dmem_be)
-          be_byte : o_dbus_rd_data = { {24{aligned_rd_data[7]}}, aligned_rd_data[ 7:0] };
-          be_half : o_dbus_rd_data = { {16{aligned_rd_data[15]}}, aligned_rd_data[15:0] };
-          default : o_dbus_rd_data = aligned_rd_data;
+          be_byte : masked_rd_data = { {24{aligned_rd_data[7]}}, aligned_rd_data[ 7:0] };
+          be_half : masked_rd_data = { {16{aligned_rd_data[15]}}, aligned_rd_data[15:0] };
+          default : masked_rd_data = aligned_rd_data;
         endcase
       end else begin         // zero padding
         case (saved_sel_dmem_be)
-          be_byte : o_dbus_rd_data = { 24'd0, aligned_rd_data[ 7:0] };
-          be_half : o_dbus_rd_data = { 16'd0, aligned_rd_data[15:0] };
-          default : o_dbus_rd_data = aligned_rd_data;
+          be_byte : masked_rd_data = { 24'd0, aligned_rd_data[ 7:0] };
+          be_half : masked_rd_data = { 16'd0, aligned_rd_data[15:0] };
+          default : masked_rd_data = aligned_rd_data;
         endcase    
       end
     end else begin
       if (saved_dmem_sext) begin // sign extension
         case (saved_sel_dmem_be)
-          be_byte : o_dbus_rd_data = { {24{aligned_rd_data[7]}}, aligned_rd_data[7:0] };
-          be_half : o_dbus_rd_data = { {16{aligned_rd_data[7]}}, aligned_rd_data[7:0], aligned_rd_data[15:8] };
-          default : o_dbus_rd_data = { aligned_rd_data[7:0], aligned_rd_data[15:8], aligned_rd_data[23:16], aligned_rd_data[31:24]};
+          be_byte : masked_rd_data = { {24{aligned_rd_data[7]}}, aligned_rd_data[7:0] };
+          be_half : masked_rd_data = { {16{aligned_rd_data[7]}}, aligned_rd_data[7:0], aligned_rd_data[15:8] };
+          default : masked_rd_data = { aligned_rd_data[7:0], aligned_rd_data[15:8], aligned_rd_data[23:16], aligned_rd_data[31:24]};
         endcase
       end else begin         // zero padding
         case (saved_sel_dmem_be)
-          be_byte : o_dbus_rd_data = { 24'd0, aligned_rd_data[7:0] };
-          be_half : o_dbus_rd_data = { 16'd0, aligned_rd_data[7:0], aligned_rd_data[15:8] };
-          default : o_dbus_rd_data = { aligned_rd_data[7:0], aligned_rd_data[15:8], aligned_rd_data[23:16], aligned_rd_data[31:24]};
+          be_byte : masked_rd_data = { 24'd0, aligned_rd_data[7:0] };
+          be_half : masked_rd_data = { 16'd0, aligned_rd_data[7:0], aligned_rd_data[15:8] };
+          default : masked_rd_data = { aligned_rd_data[7:0], aligned_rd_data[15:8], aligned_rd_data[23:16], aligned_rd_data[31:24]};
         endcase    
       end
     end
   end
+
+  assign o_dbus_rd_data = masked_rd_data;
+
+`ifdef verilator
+
+  function [31:2] get_dbus_addr();
+    // verilator public
+    logic [31:2] data;
+    if (dbus_wr_en) begin
+      data = dbus_addr;
+    end else begin
+      data = 32'b0;
+    end
+    get_mem_addr = addr;
+  endfunction
+
+  function [31:0] get_bus_wr_data();
+    // verilator public
+    get_mem_wr_data = dbus_wr_data;
+  endfunction
+
+  function [31:0] get_dbus_rd_data();
+    // verilator public
+    get_mem_rd_data = masked_rd_data;
+  endfunction
+`endif
 
 endmodule
 
