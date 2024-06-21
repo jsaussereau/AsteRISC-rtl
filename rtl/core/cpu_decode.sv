@@ -25,9 +25,6 @@
 `ifndef __CPU_DECODE__
 `define __CPU_DECODE__
 
-//TODO: add rf_rd2_used : { = `YES pour alu_opb = opb_rf (reg-reg et sauts conditionnels) et memory store } 
-// => 1 cycle en plus pour la lecture du 2eme registre avec 
-
 `ifdef VIVADO
  `include "../soc/soc_config.sv"
  `include "packages/pck_control.sv"
@@ -60,6 +57,7 @@ module cpu_decode
   parameter p_decode_buf   = 0
 )( 
   input  wire          i_clk,             //! global clock
+  input  wire          i_rst,             //! global reset
   input  wire          i_en_decode,       //! enable decode
   input  isa_instr_t   i_instr,           //! instruction from 'fetch' stage
   output isa_instr_e   o_instr_name,      //! instruction name (debug)
@@ -94,6 +92,9 @@ module cpu_decode
   output logic [31: 0] o_imm_bp,          //! immediate value (unregistered)
   output logic         o_jump_reg         //! jump register
 );
+
+  isa_instr_t   instr_reg;
+  isa_instr_t   instr;
 
   instr_type_e  instr_type;
   isa_instr_e   instr_name;
@@ -130,11 +131,28 @@ module cpu_decode
   logic         custom_instr;
   logic         illegal;
 
+  // save last instruction
+  always_ff @(posedge i_clk) begin
+    if (i_rst) begin
+      instr_reg.code <= 32'd0;
+    end else begin
+      if (i_en_decode) begin 
+        instr_reg <= i_instr;
+      end
+    end
+  end
+
+  // use last instruction if decode is disabled
   always_comb begin
-  //always_ff @(posedge i_clk) begin
+    if (i_en_decode) begin 
+      instr = i_instr;
+    end else begin
+      instr = instr_reg;
+    end
+  end
+
+  always_comb begin
     // default values:
-    if (i_en_decode) begin //TODO: find the best place to do it
-      
     instr_name       = isa_other;
     instr_type       = instr_r;
     sel_br           = br_none;
@@ -156,7 +174,7 @@ module cpu_decode
     opb_signed       = `NO;
     
     rvi_instr        = `YES;
-    casez (i_instr.code)
+    casez (instr.code)
       pck_isa_i::NOP     : begin 
         instr_name       = isa_nop;
         instr_type       = instr_r;
@@ -538,7 +556,7 @@ module cpu_decode
     // RV32M Extension (multiplication and division)
     if (p_ext_rvm) begin
       rvm_instr = `YES;
-      casez (i_instr.code)
+      casez (instr.code)
         pck_isa_m::MUL     : begin
           instr_name       = isa_mul;
           instr_type       = instr_r;
@@ -630,21 +648,21 @@ module cpu_decode
     // Ziscr Extension
     rvzicsr_instr = `YES;
     if (p_ext_rvzicsr) begin
-      casez (i_instr.code)
+      casez (instr.code)
         pck_isa_zicsr::CSRRW : begin
           instr_name       = isa_csrrw;
           instr_type       = instr_iucsr;
           sel_csr_op       = csr_op_swap;
           sel_csr_wr       = csr_wr_rf;
           wen_csr          = `YES;
-          sel_wb           = (i_instr.i.rd == 5'd0) ? wb_none : wb_csr;
+          sel_wb           = (instr.i.rd == 5'd0) ? wb_none : wb_csr;
         end
         pck_isa_zicsr::CSRRS : begin
           instr_name       = isa_csrrs;
           instr_type       = instr_iucsr;
           sel_csr_op       = csr_op_set;
           sel_csr_wr       = csr_wr_rf;
-          wen_csr          = (i_instr.i.rs1 == 5'd0) ? `NO : `YES;
+          wen_csr          = (instr.i.rs1 == 5'd0) ? `NO : `YES;
           sel_wb           = wb_csr;
         end
         pck_isa_zicsr::CSRRC : begin
@@ -652,7 +670,7 @@ module cpu_decode
           instr_type       = instr_iucsr;
           sel_csr_op       = csr_op_clear;
           sel_csr_wr       = csr_wr_rf;
-          wen_csr          = (i_instr.i.rs1 == 5'd0) ? `NO : `YES;
+          wen_csr          = (instr.i.rs1 == 5'd0) ? `NO : `YES;
           sel_wb           = wb_csr;
         end
         pck_isa_zicsr::CSRRWI : begin
@@ -661,14 +679,14 @@ module cpu_decode
           sel_csr_op       = csr_op_swap;
           sel_csr_wr       = csr_wr_imm;
           wen_csr          = `YES;
-          sel_wb           = (i_instr.i.rd == 5'd0) ? wb_none : wb_csr;
+          sel_wb           = (instr.i.rd == 5'd0) ? wb_none : wb_csr;
         end
         pck_isa_zicsr::CSRRSI : begin
           instr_name       = isa_csrrsi;
           instr_type       = instr_iucsr;
           sel_csr_op       = csr_op_set;
           sel_csr_wr       = csr_wr_imm;
-          wen_csr          = (i_instr.i.rs1 == 5'd0) ? `NO : `YES;
+          wen_csr          = (instr.i.rs1 == 5'd0) ? `NO : `YES;
           sel_wb           = wb_csr;
         end
         pck_isa_zicsr::CSRRCI : begin
@@ -676,7 +694,7 @@ module cpu_decode
           instr_type       = instr_iucsr;
           sel_csr_op       = csr_op_clear;
           sel_csr_wr       = csr_wr_imm;
-          wen_csr          = (i_instr.i.rs1 == 5'd0) ? `NO : `YES;
+          wen_csr          = (instr.i.rs1 == 5'd0) ? `NO : `YES;
           sel_wb           = wb_csr;
         end
         default            : begin
@@ -691,7 +709,7 @@ module cpu_decode
     if (p_ext_rvziswap) begin
       rvziswap_instr = `YES;
       swap_bytes     = `YES;
-      casez (i_instr.code)
+      casez (instr.code)
         pck_isa_ziswap::SWAP_LW : begin
           instr_name       = isa_swap_lw;
           instr_type       = instr_i;
@@ -744,7 +762,7 @@ module cpu_decode
     // Custom instructions extension
     if (p_ext_custom) begin
       custom_instr = `YES;
-      casez (i_instr.code)
+      casez (instr.code)
         pck_isa_custom::CUSTOM0: begin // crc6
           instr_name       = isa_custom0;
           instr_type       = instr_r;
@@ -774,8 +792,6 @@ module cpu_decode
     end else begin
       custom_instr = `NO;
     end
-    
-    end
   end
 
   assign illegal = ~rvi_instr & ~rvm_instr & ~rvzicsr_instr & ~rvziswap_instr & ~custom_instr;
@@ -790,68 +806,64 @@ module cpu_decode
 generate
   if (p_decode_buf) begin
     always_ff @(posedge i_clk) begin: unpack
-      //if (i_en_decode) begin // registers
-        o_rf_wr_addr  <= i_instr.common.rd;
-        o_rf_rd1_addr <= i_instr.common.rs1;
-        o_rf_rd2_addr <= i_instr.common.rs2;
-        o_csr_addr    <= i_instr.i.imm;
+      o_rf_wr_addr  <= instr.common.rd;
+      o_rf_rd1_addr <= instr.common.rs1;
+      o_rf_rd2_addr <= instr.common.rs2;
+      o_csr_addr    <= instr.i.imm;
 
-        o_sel_br      <= sel_br;
-        o_sel_alu_op  <= sel_alu_op;
-        o_sel_alu_opa <= sel_alu_opa;
-        o_sel_alu_opb <= sel_alu_opb; 
-        o_sel_wb      <= sel_wb;
-        o_sel_dmem_be <= sel_dmem_be;
-        o_sel_md_op   <= sel_md_op;
-        o_sel_csr_wr  <= sel_csr_wr;
-        o_sel_csr_op  <= sel_csr_op;
-        o_opa_signed  <= opa_signed;
-        o_opb_signed  <= opb_signed;
-        o_rf_rd2_used <= rf_rd2_used;
-        o_dmem_sext   <= dmem_sext;
-        o_dmem_wr     <= dmem_wr;
-        o_dmem_rd     <= dmem_rd;
-        o_swap_bytes  <= swap_bytes;
-        o_en_wb       <= en_wb;
-        o_wen_csr     <= wen_csr;
-        o_ren_csr     <= ren_csr;
-        o_imm         <= imm;
-        o_cond_branch <= cond_branch;
-        o_jump_reg    <= jump_reg;
-      //end 
+      o_sel_br      <= sel_br;
+      o_sel_alu_op  <= sel_alu_op;
+      o_sel_alu_opa <= sel_alu_opa;
+      o_sel_alu_opb <= sel_alu_opb; 
+      o_sel_wb      <= sel_wb;
+      o_sel_dmem_be <= sel_dmem_be;
+      o_sel_md_op   <= sel_md_op;
+      o_sel_csr_wr  <= sel_csr_wr;
+      o_sel_csr_op  <= sel_csr_op;
+      o_opa_signed  <= opa_signed;
+      o_opb_signed  <= opb_signed;
+      o_rf_rd2_used <= rf_rd2_used;
+      o_dmem_sext   <= dmem_sext;
+      o_dmem_wr     <= dmem_wr;
+      o_dmem_rd     <= dmem_rd;
+      o_swap_bytes  <= swap_bytes;
+      o_en_wb       <= en_wb;
+      o_wen_csr     <= wen_csr;
+      o_ren_csr     <= ren_csr;
+      o_imm         <= imm;
+      o_cond_branch <= cond_branch;
+      o_jump_reg    <= jump_reg;
     end 
   end else begin
     always_comb begin: unpack
-      //if (i_en_decode) begin // latches
-        o_rf_wr_addr  = i_instr.common.rd;
-        o_rf_rd1_addr = i_instr.common.rs1;
-        o_rf_rd2_addr = i_instr.common.rs2;
-        o_csr_addr    = i_instr.i.imm;
+      o_rf_wr_addr  = instr.common.rd;
+      o_rf_rd1_addr = instr.common.rs1;
+      o_rf_rd2_addr = instr.common.rs2;
+      o_csr_addr    = instr.i.imm;
 
-        o_sel_br      = sel_br;
-        o_sel_alu_op  = sel_alu_op;
-        o_sel_alu_opa = sel_alu_opa;
-        o_sel_alu_opb = sel_alu_opb; 
-        o_sel_wb      = sel_wb;
-        o_sel_dmem_be = sel_dmem_be;
-        o_sel_md_op   = sel_md_op;
-        o_sel_csr_wr  = sel_csr_wr;
-        o_sel_csr_op  = sel_csr_op;
-        o_opa_signed  = opa_signed;
-        o_opb_signed  = opb_signed;
-        o_rf_rd2_used = rf_rd2_used;
-        o_dmem_sext   = dmem_sext;
-        o_dmem_wr     = dmem_wr;
-        o_dmem_rd     = dmem_rd;
-        o_swap_bytes  = swap_bytes;
-        o_en_wb       = en_wb;
-        o_wen_csr     = wen_csr;
-        o_ren_csr     = ren_csr;
-        o_imm         = imm;
-        o_cond_branch = cond_branch;
-        o_jump_reg    = jump_reg;
+      o_sel_br      = sel_br;
+      o_sel_alu_op  = sel_alu_op;
+      o_sel_alu_opa = sel_alu_opa;
+      o_sel_alu_opb = sel_alu_opb; 
+      o_sel_wb      = sel_wb;
+      o_sel_dmem_be = sel_dmem_be;
+      o_sel_md_op   = sel_md_op;
+      o_sel_csr_wr  = sel_csr_wr;
+      o_sel_csr_op  = sel_csr_op;
+      o_opa_signed  = opa_signed;
+      o_opb_signed  = opb_signed;
+      o_rf_rd2_used = rf_rd2_used;
+      o_dmem_sext   = dmem_sext;
+      o_dmem_wr     = dmem_wr;
+      o_dmem_rd     = dmem_rd;
+      o_swap_bytes  = swap_bytes;
+      o_en_wb       = en_wb;
+      o_wen_csr     = wen_csr;
+      o_ren_csr     = ren_csr;
+      o_imm         = imm;
+      o_cond_branch = cond_branch;
+      o_jump_reg    = jump_reg;
       end
-    //end 
   end
 endgenerate
 
@@ -859,7 +871,7 @@ endgenerate
   cpu_imm_gen #(
     .p_branch_imm ( 0          )
   ) imm_gen (
-    .i_instr      ( i_instr    ),
+    .i_instr      ( instr      ),
     .i_instr_type ( instr_type ),
     .o_imm        ( imm        )
   );

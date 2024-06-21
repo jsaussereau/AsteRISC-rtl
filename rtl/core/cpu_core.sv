@@ -383,6 +383,7 @@ module cpu_core
     .p_decode_buf   ( p_decode_buf    )
   ) decode_stage (
     .i_clk          ( i_clk           ),
+    .i_rst          ( i_rst           ),
     .i_en_decode    ( en_decode       ),
     .i_instr        ( instr_decomp    ),
     .o_instr_name   ( instr_name      ),
