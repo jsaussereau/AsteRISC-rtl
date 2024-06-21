@@ -33,6 +33,7 @@
 `ifndef __WRAP_RAM_DMEM__
 `define __WRAP_RAM_DMEM__
 
+/*verilator public_on*/
 module wrap_ram_dmem #(
   parameter p_addr_base = 32'h10000000,
   parameter p_addr_mask = 32'hfffff000,
@@ -52,6 +53,7 @@ module wrap_ram_dmem #(
   output logic        o_ack       //! transfer acknowledge
 );
 
+  /*verilator public_on*/
   soc_sp_ram #(
     .p_addr_base    ( p_addr_base                ),
     .p_addr_mask    ( p_addr_mask                ),
@@ -71,6 +73,7 @@ module wrap_ram_dmem #(
     .o_busy         ( o_busy                     ),
     .o_ack          ( o_ack                      ) 
   );
+  /*verilator public_off*/
 
 endmodule
 
