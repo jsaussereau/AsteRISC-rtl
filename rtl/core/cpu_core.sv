@@ -120,7 +120,7 @@ module cpu_core
   wire          en_wb;                    //! register file write enable. if p_wb_buf and p_decode_buf are enabled, the decode stage will be used for wb
   wire          wb_state;                 //! fsm currently in wb state
   wire          cond_branch;              //! conditionnal branch
- wire          jump_reg;                 //! jump register
+  wire          jump_reg;                 //! jump register
 
   // regfile
   wire          rf_rd1_en;                //! read first register (used only if p_rf_sp = 1)
@@ -544,6 +544,107 @@ module cpu_core
     .o_rf_wr_data   ( rf_wr_data      ),
     .o_rf_wr_en     ( rf_wr_en        ) 
   );
+
+  /******************
+    Debug functions
+  ******************/
+
+`ifdef verilator
+
+  function [31: 0] get_imm();
+    // verilator public
+    get_imm = imm;
+  endfunction
+  function [31: 0] get_rs1_addr();
+    // verilator public
+    get_rs1_addr = rf_rd1_addr;
+  endfunction
+  function [31: 0] get_rs1_data();
+    // verilator public
+    get_rs1_data = rf_rd1_data;
+  endfunction
+  function get_rs2_used();
+    // verilator public
+    get_rs2_used = rf_rd2_used;
+  endfunction
+  function [31: 0] get_rs2_addr();
+    // verilator public
+    get_rs2_addr = rf_rd2_addr;
+  endfunction
+  function [31: 0] get_rs2_data();
+    // verilator public
+    get_rs2_data = rf_rd2_data;
+  endfunction
+  function [31: 0] get_wb_addr();
+    // verilator public
+    get_wb_addr  = rf_wr_addr;
+  endfunction
+  function [31: 0] get_wb_data();
+    // verilator public
+    get_wb_data = rf_wr_data;
+  endfunction
+  function get_wb_en();
+    // verilator public
+    get_wb_en = wb;
+  endfunction
+  function get_br_taken();
+    // verilator public
+    get_br_taken = branch_taken;
+  endfunction
+  function [31: 0] get_pc();
+  // verilator public
+    get_pc = debug_pc;
+  endfunction
+  function [63: 0] get_instret();
+  // verilator public
+    get_instret = debug_instret;
+  endfunction
+  function string  get_instr_name();
+  // verilator public
+    get_instr_name = strtail(debug_instr_name.name());
+  endfunction
+  function [31: 0] get_instr_code();
+  // verilator public
+    get_instr_code = debug_instr_code;
+  endfunction
+
+  function get_stall_rs1();
+    // verilator public
+    get_stall_rs1 = 1'b0;
+  endfunction
+  function get_stall_rs2();
+    // verilator public
+    get_stall_rs2 = 1'b0;
+  endfunction
+  function get_bp_rs1_ex();
+    // verilator public
+    get_bp_rs1_ex = 1'b0;
+  endfunction
+  function get_bp_rs1_ma();
+    // verilator public
+    get_bp_rs1_ma = 1'b0;
+  endfunction
+  function get_bp_rs1_wb();
+    // verilator public
+    get_bp_rs1_wb = 1'b0;
+  endfunction
+  function get_bp_rs2_ex();
+    // verilator public
+    get_bp_rs2_ex = 1'b0;
+  endfunction
+  function get_bp_rs2_ma();
+    // verilator public
+    get_bp_rs2_ma = 1'b0;
+  endfunction
+  function get_bp_rs2_wb();
+    // verilator public
+    get_bp_rs2_wb = 1'b0;
+  endfunction
+
+  function automatic string strtail(string str);
+    strtail = str.substr(4, str.len()-1);
+  endfunction
+`endif
 
 endmodule
 
