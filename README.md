@@ -1,5 +1,10 @@
 # AsteRISC-core
 
+[![GitHub](https://img.shields.io/badge/GitHub-AsteRISC-blue.svg?logo=github)](https://github.com/jsaussereau/AsteRISC)
+[![GitHub](https://img.shields.io/badge/GitHub-AsteRISC--core-blue.svg?logo=github)](https://github.com/jsaussereau/AsteRISC-core)
+[![GitHub License](https://img.shields.io/github/license/jsaussereau/AsteRISC)](https://github.com/jsaussereau/AsteRISC/blob/main/LICENSE)
+[![Documentation Status](https://readthedocs.org/projects/asterisc/badge/?version=latest)](https://asterism.readthedocs.io)
+
 ## Overview
 
 <img src="docs/images/asterisc_infog.png" align="left" width="175"/>
@@ -20,7 +25,7 @@ Supported RISC-V extensions: `RV32`[`I`/`E`][`M`][`C`][`Zicsr`]
 
 The AsteRISC RISC-V core is part of a comprehensive environment meant to generate and compare AsteRISC configurations based on various metrics for specific applications. This environment facilitates finding the microarchitecture that best fits application constraints.
 
-Find the complete AsteRISC environment [here](https://github.com/jsaussereau/AsteRISC).
+Find the complete AsteRISC environment here : [![GitHub](https://img.shields.io/badge/GitHub-AsteRISC-blue.svg?logo=github)](https://github.com/jsaussereau/AsteRISC)
 
 ## Contact
 
