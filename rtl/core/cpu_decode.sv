@@ -31,6 +31,8 @@
  `include "packages/pck_isa.sv"
  `include "packages/pck_isa_i.sv"
  `include "packages/pck_isa_m.sv"
+ `include "packages/pck_isa_zicsr.sv"
+ `include "packages/pck_isa_ziswap.sv"
  `include "packages/pck_isa_custom.sv"
 `else
  `include "soc/soc_config.sv"
@@ -38,9 +40,11 @@
  `include "core/packages/pck_isa.sv"
  `include "core/packages/pck_isa_i.sv"
  `include "core/packages/pck_isa_m.sv"
+ `include "core/packages/pck_isa_zicsr.sv"
+ `include "core/packages/pck_isa_ziswap.sv"
  `include "core/packages/pck_isa_custom.sv"
 `endif
- 
+
 
 module cpu_decode
   import pck_isa::*;
