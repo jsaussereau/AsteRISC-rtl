@@ -32,34 +32,46 @@
 module soc_wrapper_top #(
   /* verilator public_on*/
 
-  //general settings
+  // general settings
   parameter p_reset_vector    = 32'hf0000000,
   parameter p_num_gpios       = 24,
 
-  //chip ids
+  // chip ids
   parameter p_manufacturer_id = 12'h456,
   parameter p_product_id      = 8'h01,
 
-  //imem/dmem detpth (power of two)
-  parameter p_imem_depth_pw2  = 14,           //! depth of the instruction memory in power of two (number of 32-bit words)
-  parameter p_dmem_depth_pw2  = 13,           //! depth of the data memory in power of two (number of 32-bit words)
-
+  
   //imem/dmem init files (simulations)
   parameter string p_imem_init = "/home/jsaussereau/Documents/bdxrcg/AsteRISC/AsteRISC-firmware/hex/dhrystone_benchmark_imem.hex",
   parameter string p_dmem_init = "/home/jsaussereau/Documents/bdxrcg/AsteRISC/AsteRISC-firmware/hex/dhrystone_benchmark_dmem.hex",
-
-  //RISC-V extensions
-  parameter p_ext_rve         = 0,           //! use RV32E extension (reduces the integer register count to 16)
-  parameter p_ext_rvc         = 0,           //! use RV32C extension (compressed instructions)
-  parameter p_ext_rvm         = 0,           //! use RV32M extension (multiplication and division)
-  parameter p_ext_rvzicsr     = 1,           //! use RV32Zicsr extension (control and status registers)
-  parameter p_ext_custom      = 0,           //! use custom extension
   
+  // <sim_override> ------------------ 
+  //imem/dmem detpth (power of two)
+  // <mem>
+  parameter p_imem_depth_pw2  = 14,          //! depth of the instruction memory in power of two (number of 32-bit words)
+  parameter p_dmem_depth_pw2  = 13,          //! depth of the data memory in power of two (number of 32-bit words)
+  // </mem>
+  
+  //RISC-V extensions
+  
+  parameter p_ext_rvzicsr     = 1,           //! use RV32Zicsr extension (control and status registers)
   parameter p_counters        = 1,           //! use counters (mcycle, minstret, mtime)
+  // </sim_override> ------------------ 
+  
+  // <baseline>
+  parameter p_ext_rve         = 0,           //! use RV32E extension (reduces the integer register count to 16)
+  // </baseline>
+  
+  parameter p_ext_rvc         = 0,           //! use RV32C extension (compressed instructions)
+  parameter p_ext_custom      = 0,           //! use custom extension
 
+  // <mul>
+  parameter p_ext_rvm         = 0,           //! use RV32M extension (multiplication and division)
   parameter p_mul_fast        = 0,           //! fast mul
   parameter p_mul_1_cycle     = 0,           //! one cycle mul
+  // </mul>
 
+  // <main>
   parameter p_pipeline        = 0,           //! implement a pipepined architecure
 
   // pipeline settings:   
@@ -71,7 +83,7 @@ module soc_wrapper_top #(
   parameter p_stage_MA        = 1,           //! use a register barrier after MA stage
   parameter p_stage_WB        = 1,           //! use a register barrier after WB stage
 
-  // non pipeline settings:   
+  // multi-cycle settings:   
   parameter p_prefetch_buf    = 0,           //! use a prefetch buffer
   parameter p_decode_buf      = 1,           //! add buffers to decode stage outputs
   parameter p_rf_sp           = 0,           //! register file is a single port ram
@@ -79,6 +91,7 @@ module soc_wrapper_top #(
   parameter p_mem_buf         = 0,           //! add buffers to mem stage inputs
   parameter p_wb_buf          = 1,           //! add buffers to write back stage inputs
   parameter p_branch_buf      = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
+  // </main>
 
   //implementation customization (not functionnal yet...)
   parameter p_imem_sram       = 1,            //! implement instruction memory in sram?
