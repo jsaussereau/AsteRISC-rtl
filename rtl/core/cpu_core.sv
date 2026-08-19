@@ -455,7 +455,7 @@ module cpu_core
     .i_sel_csr_wr   ( sel_csr_wr      ),
     .i_sel_csr_op   ( sel_csr_op      ),
     .i_addr         ( csr_addr        ),
-    .i_wr_en        ( 1'b0            ),
+    .i_wr_en        ( wen_csr && en_wb ),
     .i_rf_rd1_data  ( rf_rd1_data     ),
     .o_rd_data      ( csr_rd_data     )
   );
