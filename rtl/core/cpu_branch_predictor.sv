@@ -27,9 +27,11 @@
 `ifdef VIVADO
  `include "packages/pck_control.sv"
  `include "packages/pck_isa.sv"
+ `include "packages/pck_isa_i.sv"
 `else
  `include "core/packages/pck_control.sv"
  `include "core/packages/pck_isa.sv"
+ `include "core/packages/pck_isa_i.sv"
 `endif
 
 //FIXME: handle instruction cut between two addresses
@@ -37,6 +39,7 @@
 module cpu_branch_predictor
   import pck_control::*;
   import pck_isa::*;
+  import pck_isa_i::*;
 #(
   parameter p_reset_vector = 32'hf0000000,
   parameter p_branch_buf   = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
@@ -122,7 +125,7 @@ module cpu_branch_predictor
 
   cpu_static_branch_predictor branch_predictor (
     .i_cond_branch  ( cond_br_bp    ),
-    .i_branch_instr ( br_inst_bp    ),
+    .i_branch_instr ( br_instr_bp   ),
     .i_jalr_instr   ( jalr_instr_bp ),
     .i_imm          ( imm_bp        ),
     .i_pc           ( i_pc          ),
