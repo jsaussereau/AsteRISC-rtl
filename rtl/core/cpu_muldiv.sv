@@ -55,7 +55,7 @@ module cpu_muldiv
 
   output logic [32:0]  o_alu_op_a_md,     //! ALU operand A from muldiv
   output logic [32:0]  o_alu_op_b_md,     //! ALU operand B from muldiv
-  output logic         o_alu_use_md,     //! use muldiv opa and opb outputs as ALU input
+  output logic         o_alu_use_md,      //! use muldiv opa and opb outputs as ALU input
 
   output logic [31:0]  o_out,             //! MUL/DIV result
   output logic         o_exec_done        //! MUL/DIV done (data valid)
@@ -64,6 +64,7 @@ module cpu_muldiv
   logic        mul_en;                    //! MUL enable
   logic        div_en;                    //! DIV enable
   logic [ 1:0] signed_mode;               //! operands signed/unsigned
+  logic [31:0] ibex_out;                  //! Internal wire to catch ibex output
 
   logic [33:0] imd_val_d_ex [2];          //! intermediate register for multicycle ops
   logic [33:0] imd_val_q_ex [2];          //! intermediate register for multicycle ops
@@ -89,7 +90,7 @@ module cpu_muldiv
     endcase
   end
 
-  assign signed_mode = { i_opa_signed, i_opb_signed };
+  assign signed_mode = { i_opb_signed, i_opa_signed };
 
   for (genvar i = 0 ; i < 2 ; i++) begin: gen_intermediate_val_reg
     always_ff @(posedge i_clk) begin: intermediate_val_reg
@@ -129,7 +130,7 @@ module cpu_muldiv
         .imd_val_we_o       ( imd_val_we_ex      ),
 
         .multdiv_ready_id_i ( i_en_exec          ),
-        .multdiv_result_o   ( o_out              ),
+        .multdiv_result_o   ( ibex_out           ),
 
         .valid_o            ( o_exec_done        )
       );
@@ -158,12 +159,14 @@ module cpu_muldiv
         .imd_val_we_o       ( imd_val_we_ex      ),
 
         .multdiv_ready_id_i ( i_en_exec          ),
-        .multdiv_result_o   ( o_out              ),
+        .multdiv_result_o   ( ibex_out           ),
 
         .valid_o            ( o_exec_done        )
       );
     end
   endgenerate
+
+  assign o_out = div_en ? imd_val_q_ex[0][31:0] : ibex_out;
 
 endmodule
 
