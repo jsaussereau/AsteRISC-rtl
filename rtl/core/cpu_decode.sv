@@ -585,7 +585,7 @@ module cpu_decode
           instr_name       = isa_mulsu;
           instr_type       = instr_r;
           sel_alu_op       = alu_add;
-          sel_md_op        = muldiv_mull;
+          sel_md_op        = muldiv_mulh;
           opa_signed       = `YES;
           opb_signed       = `NO;
           rf_rd2_used      = `YES;
@@ -595,7 +595,7 @@ module cpu_decode
           instr_name       = isa_mulu;
           instr_type       = instr_r;
           sel_alu_op       = alu_add;
-          sel_md_op        = muldiv_mull;
+          sel_md_op        = muldiv_mulh;
           opa_signed       = `NO;
           opb_signed       = `NO;
           rf_rd2_used      = `YES;
