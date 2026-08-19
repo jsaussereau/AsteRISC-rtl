@@ -335,8 +335,8 @@ generate
         pck_isa_c::C_SW       : begin   // sw rs2', offset[6:2](rs1')
           instr_name_c        = isa_c_sw;
           instr_d.code        = pck_isa_i::SW;
-          instr_d.s.imm11_5   = { 4'b0, instr_c.cs.imm1_0[5], instr_c.cs.imm4_2[12:11] };
-          instr_d.s.imm4_0    = { instr_c.cs.imm4_2[10], instr_c.cs.imm1_0[6], 2'b0 };
+          instr_d.s.imm11_5   = { 5'b0, instr_c.cs.imm1_0[5], instr_c.cs.imm4_2[12] };
+          instr_d.s.imm4_0    = { instr_c.cs.imm4_2[11:10], instr_c.cs.imm1_0[6], 2'b0 };
           instr_d.s.rs1       = uncompress_reg_addr(instr_c.cs.rs1_);
           instr_d.s.rs2       = uncompress_reg_addr(instr_c.cs.rs2_);
         end 
@@ -376,22 +376,22 @@ generate
         pck_isa_c::C_BEQZ     : begin   // beq rs1', x0, offset[8:1]
           instr_name_c        = isa_c_beqz;
           instr_d.code        = pck_isa_i::BEQ;
-          instr_d.b.imm12     = 1'b0;
-          instr_d.b.imm10_5   = { 1'b0, b_offset[8:4] };
+          instr_d.b.imm12     = b_offset[8];
+          instr_d.b.imm10_5   = { {3{b_offset[8]}}, b_offset[7:5] };
           instr_d.b.rs2       = 5'd0; // x0
           instr_d.b.rs1       = uncompress_reg_addr(instr_c.cb.rd_rs1_);
-          instr_d.b.imm4_1    = { b_offset[3:1], 1'b0 };
-          instr_d.b.imm11     = 1'b0;
+          instr_d.b.imm4_1    = b_offset[4:1];
+          instr_d.b.imm11     = b_offset[8];
         end
         pck_isa_c::C_BNEZ     :  begin  // bne rs1', x0, offset[8:1]
           instr_name_c        = isa_c_bnez;
           instr_d.code        = pck_isa_i::BNE;
-          instr_d.b.imm12     = 1'b0;
-          instr_d.b.imm10_5   = { 1'b0, b_offset[8:4] };
+          instr_d.b.imm12     = b_offset[8];
+          instr_d.b.imm10_5   = { {3{b_offset[8]}}, b_offset[7:5] };
           instr_d.b.rs2       = 5'd0; // x0
           instr_d.b.rs1       = uncompress_reg_addr(instr_c.cb.rd_rs1_);
-          instr_d.b.imm4_1    = { b_offset[3:1], 1'b0 };
-          instr_d.b.imm11     = 1'b0;
+          instr_d.b.imm4_1    = b_offset[4:1];
+          instr_d.b.imm11     = b_offset[8];
         end
 
         pck_isa_c::C_ADDI     : begin   // addi rd, rd, nzimm[5:0]
@@ -418,9 +418,9 @@ generate
         pck_isa_c::C_SLLI     : begin   // slli rd, rd, shamt[5:0]
           instr_name_c        = isa_c_slli;
           instr_d.code        = pck_isa_i::SLLI;
-          instr_d.i.imm       = { 6'b0, instr_c.ciw.imm };
-          instr_d.i.rs1       = instr_c.ciw.rd_;
-          instr_d.i.rd        = instr_c.ciw.rd_;
+          instr_d.i.imm       = { 6'b0, instr_c.ci.imm5, instr_c.ci.imm4_0 };
+          instr_d.i.rs1       = instr_c.ci.rd_rs1;
+          instr_d.i.rd        = instr_c.ci.rd_rs1;
         end
         pck_isa_c::C_SRLI     : begin   // srli rd',rd', shamt[5:0]
           instr_name_c        = isa_c_srli;
@@ -439,7 +439,7 @@ generate
         pck_isa_c::C_ANDI     : begin   // andi rd', rd', imm[5:0]
           instr_name_c        = isa_c_andi;
           instr_d.code        = pck_isa_i::ANDI;
-          instr_d.i.imm       = { 6'b0, instr_c.cb2.imm5, instr_c.cb2.imm4_0 };
+          instr_d.i.imm       = { {6{instr_c.cb2.imm5}}, instr_c.cb2.imm5, instr_c.cb2.imm4_0 };
           instr_d.i.rs1       = uncompress_reg_addr(instr_c.cb2.rd_rs1_);
           instr_d.i.rd        = uncompress_reg_addr(instr_c.cb2.rd_rs1_);
         end
@@ -447,7 +447,7 @@ generate
         pck_isa_c::C_LI       : begin   // addi rd, x0, imm[5:0]
           instr_name_c        = isa_c_li;
           instr_d.code        = pck_isa_i::ADDI;
-          instr_d.i.imm       = { 6'b0, instr_c.ci.imm5, instr_c.ci.imm4_0 };
+          instr_d.i.imm       = { {6{instr_c.ci.imm5}}, instr_c.ci.imm5, instr_c.ci.imm4_0 };
           instr_d.i.rs1       = 5'd0; // x0
           instr_d.i.rd        = instr_c.ci.rd_rs1;
         end
