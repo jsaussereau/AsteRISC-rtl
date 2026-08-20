@@ -115,6 +115,10 @@ module cpu_hazard
   parameter p_stage_MA     = 1,           //! number of memory access barriers (>= 1)
   parameter p_stage_WB     = 1,           //! number of write back barriers
   parameter p_early_jal    = 1,           //! resolve `jal` from the decoder instead of the RF slot
+  //! branch prediction scheme (shared with the multi-cycle core):
+  //!   0 = off, 1 = static (backward taken / forward not taken).
+  //! Higher values are reserved for the dynamic predictors to come.
+  parameter p_branch_pred  = 0,           //! branch prediction scheme
   parameter p_redirect_buf = 1,           //! register the redirection target before the fetch stage
   parameter p_n_fwd        = 3            //! number of in-flight register writes presented by the core
 )(
@@ -124,6 +128,10 @@ module cpu_hazard
   // slot occupancy
   input  wire          i_valid_IC,        //! the IC slot holds a real instruction
   input  wire          i_valid_RF,        //! the RF slot holds a real instruction
+
+  // branch prediction (`p_branch_pred`)
+  input  wire          i_predict_IC,      //! the IC slot holds a branch predicted taken
+  input  wire          i_predicted_RF,    //! the RF slot instruction was predicted taken
 
   // consumer: source registers read by the instruction in the RF slot
   input  wire  [ 4: 0] i_rd1_addr_RF,     //! rs1 address
@@ -280,16 +288,28 @@ module cpu_hazard
   //! `jal` needs no register value: its target is `pc + imm`, both available
   //! straight out of the decoder. Resolving it there removes one bubble per
   //! taken jump for each front-end barrier.
-  wire          redirect_IC = (p_early_jal != 0)
-                            & i_valid_IC
+  //! a conditional branch predicted taken redirects the front-end from the very
+  //! same slot: the predicted target is `pc + imm`, exactly what `jal` uses
+  wire          predict_IC  = (p_branch_pred != 0) & i_predict_IC;
+
+  wire          redirect_IC = i_valid_IC
                             & ~freeze_IC
-                            & (i_sel_br_IC == br_jal);
+                            & ( ((p_early_jal != 0) & (i_sel_br_IC == br_jal))
+                              | predict_IC );
 
   //! every other control transfer resolves where the execute unit produces its
   //! verdict. `jal` is skipped here when it was already handled above.
+  //! with prediction enabled the RF slot no longer redirects on *taken*, but on
+  //! *disagreement*: a branch predicted taken and confirmed taken has already
+  //! been redirected at the IC slot and costs nothing here, while a branch
+  //! predicted taken that turns out not taken has to be undone -- the core
+  //! sends it back to `pc_inc`.
+  wire          mispredict_RF = (p_branch_pred != 0) ? (i_branch_taken_RF ^ i_predicted_RF)
+                                                     :  i_branch_taken_RF;
+
   wire          redirect_RF = i_valid_RF
                             & ~freeze_RF
-                            & i_branch_taken_RF
+                            & mispredict_RF
                             & ~((p_early_jal != 0) & (i_sel_br_RF == br_jal));
 
   //! an older instruction always wins: the RF slot is downstream of the IC slot

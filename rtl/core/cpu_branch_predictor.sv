@@ -56,6 +56,7 @@ module cpu_branch_predictor
   input  wire          i_jalr_instr_bp,   //! jalr instruction (unregistered)
   input  wire  [31: 0] i_imm_bp,          //! immediate value (unregistered)
   output wire  [31: 0] o_predicted_pc,    //! predicted pc value
+  output wire          o_predict_taken,   //! the control transfer is predicted taken
   output wire          o_branch_instr     //! branch instruction
 );
   
@@ -64,6 +65,7 @@ module cpu_branch_predictor
   logic         br_instr;
   logic         jalr_instr;
   logic [31: 0] predicted_pc;
+  logic         predict_taken;
 
   wire          cond_br_bp;
   wire          br_instr_bp;
@@ -129,10 +131,12 @@ module cpu_branch_predictor
     .i_jalr_instr   ( jalr_instr_bp ),
     .i_imm          ( imm_bp        ),
     .i_pc           ( i_pc          ),
-    .o_predicted_pc ( predicted_pc  )
+    .o_predicted_pc ( predicted_pc  ),
+    .o_predict_taken( predict_taken )
   );
   
-  assign o_predicted_pc = predicted_pc;
+  assign o_predicted_pc  = predicted_pc;
+  assign o_predict_taken = predict_taken;
   assign o_branch_instr = p_mini_decoder ? br_instr : i_br_instr_bp;
 
 endmodule

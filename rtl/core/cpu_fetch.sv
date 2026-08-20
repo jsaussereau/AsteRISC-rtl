@@ -39,7 +39,10 @@ module cpu_fetch
   import pck_isa::*;
 #(
   parameter p_reset_vector = 32'hf0000000,
-  parameter p_prefetch_buf = 0,           //! use a prefetch buffer
+  //! branch prediction scheme: 0 = off, 1 = static (backward taken / forward
+  //! not taken). Higher values are reserved for the dynamic predictors to come.
+  parameter p_branch_pred  = 0,           //! branch prediction scheme
+  parameter p_fetch_buf    = 0,           //! add buffers to fetch stage output
   parameter p_branch_buf   = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
   parameter p_counters     = 0            //! use minstret counter
 )(
@@ -118,6 +121,7 @@ module cpu_fetch
   logic [63: 0] minstret_reg_out;         //! 
   logic [31: 0] computed_pc_reg;          //! computed pc value
   logic [31: 0] predicted_pc_reg;         //! predicted pc value
+  logic [31: 0] instr_code;               //! instruction word selected from the bus
   logic [31: 0] ibus_rd_data_reg;         //! buffered intruction from memory
   logic         bad_predict_reg;          //!
   logic         fetch_alternate_reg;      //!
@@ -169,14 +173,14 @@ module cpu_fetch
     rf_rd1_data_reg     <= i_rf_rd1_data;
     sel_pc_reg          <= i_sel_pc;
     en_fetch_reg        <= i_en_fetch;
-    ibus_rd_data_reg    <= ibus_rd_data;
+    ibus_rd_data_reg    <= instr_code;
     //computed_pc_reg     <= computed_pc;
     predicted_pc_reg    <= predicted_pc;
     bad_predict_gate_reg<= bad_predict_gate;
     fetch_alternate_reg <= fetch_alternate;
   end
 
-  if (p_prefetch_buf) begin
+  if (p_branch_pred) begin
     //! compute the next program counter value
     always_comb begin: compute_pc_value
       if (i_freeze_pc) begin
@@ -210,7 +214,7 @@ module cpu_fetch
   end
 
   always_comb begin: select_next_pc
-    if (p_prefetch_buf) begin
+    if (p_branch_pred) begin
       /*if (!branch_instr) begin
         next_pc = computed_pc;
       end else */if (fetch_alternate && bad_predict) begin
@@ -223,8 +227,8 @@ module cpu_fetch
     end
   end
 
-  // optionnal prefetch buffer
-  if (p_prefetch_buf) begin
+  // optionnal branch predictor (p_branch_pred == 1: static scheme)
+  if (p_branch_pred == 1) begin
     cpu_branch_predictor #(
       .p_reset_vector ( p_reset_vector  ),
       .p_branch_buf   ( p_branch_buf    ),
@@ -240,6 +244,7 @@ module cpu_fetch
       .i_jalr_instr_bp( i_jalr_instr_bp ),
       .i_imm_bp       ( i_imm_bp        ),
       .o_predicted_pc ( predicted_pc    ),
+      .o_predict_taken(                 ),
       .o_branch_instr ( branch_instr    )
     );
   end else begin
@@ -256,7 +261,7 @@ module cpu_fetch
   end
 
   always_comb begin
-    fetch_alternate = p_prefetch_buf & en_fetch_reg & branch_instr;
+    fetch_alternate = (p_branch_pred != 0) & en_fetch_reg & branch_instr;
     /*if (fetch_alternate_reg) begin
       ibus_rd_data_saved = ibus_rd_data;
     end*/
@@ -286,24 +291,24 @@ module cpu_fetch
   // check if prediction was right
   always_comb begin
     if (predicted_pc_reg != computed_pc_reg) begin
-      bad_predict = p_prefetch_buf; // only a bad prediction if prediction is enabled
+      bad_predict = (p_branch_pred != 0); // only a bad prediction if prediction is enabled
     end else begin
       bad_predict = 1'b0;
     end
   end
 
-  // output buffered instruction if prefetch is enabled
+  // select the instruction word: on a mispredict the alternate path was saved
   always_comb begin
-    if (p_prefetch_buf) begin
-      if (fetch_alternate_reg) begin
-        instr.code = bad_predict ? ibus_rd_data_saved : ibus_rd_data;
-      end else begin
-        instr.code = ibus_rd_data;
-      end
+    if (p_branch_pred && fetch_alternate_reg && bad_predict) begin
+      instr_code = ibus_rd_data_saved;
     end else begin
-      instr.code = ibus_rd_data;
+      instr_code = ibus_rd_data;
     end
   end
+
+  //! optionnal fetch stage output buffer: cuts the imem read data path at the
+  //! cost of one extra cycle per instruction (Fmax vs IPC trade-off)
+  assign instr.code = p_fetch_buf ? ibus_rd_data_reg : instr_code;
 
   assign bad_predict_gate = bad_predict & i_wb_state;
   assign bad_predict_pulse = bad_predict_gate & (bad_predict_gate^bad_predict_gate_reg);

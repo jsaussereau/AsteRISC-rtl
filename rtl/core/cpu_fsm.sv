@@ -37,7 +37,8 @@ module cpu_fsm
 #(
   parameter p_rf_sp        = 0,       //! register file is a single port ram
   parameter p_rf_read_buf  = 0,       //! register file has synchronous read
-  parameter p_prefetch_buf = 0,       //! use a prefetch buffer
+  parameter p_branch_pred  = 0,       //! branch prediction scheme (0 = off, 1 = static)
+  parameter p_fetch_buf    = 0,       //! add buffers to fetch stage output
   parameter p_decode_buf   = 0,       //! add buffers to decode stage outputs
   parameter p_mem_buf      = 0,       //! add buffers to mem stage inputs
   parameter p_branch_buf   = 0,       //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
@@ -85,6 +86,7 @@ module cpu_fsm
     st_init,
     st_refetch,
     st_refetch2,
+    st_fetch_buf,
     st_decode,
     st_read_rf,
     st_read_rf_sp,
@@ -97,13 +99,17 @@ module cpu_fsm
     st_write_back_buf
   } fsm_state_e;
 
+  //! state reached once a fetch has been issued: with `p_fetch_buf` the
+  //! instruction word is only available one cycle later, hence the bubble.
+  localparam fsm_state_e fetch_next_state = p_fetch_buf   ? st_fetch_buf
+                                          : p_decode_buf  ? st_decode
+                                          : p_rf_read_buf ? st_read_rf
+                                          :                 st_execute;
+
   fsm_state_e last_state;             //! last fsm state
   fsm_state_e curr_state;             //! current fsm state
   fsm_state_e next_state;             //! next fsm state
 
-  //localparam fsm_state_e decode_next_state  = p_rf_read_buf ? st_read_rf    : st_execute;
-  //localparam fsm_state_e init_next_state    = p_decode_buf  ? st_decode     : p_rf_read_buf ? st_read_rf : st_execute;
-  //localparam fsm_state_e rf_read_next_state = p_rf_sp       ? st_read_rf_sp : st_execute;
 
   logic init_update_pc;
   logic exec_en_fetch;
@@ -147,7 +153,7 @@ module cpu_fsm
     case (curr_state)
       st_init: begin
         if (!i_ibus_busy) begin // wait for instruction memory to be ready
-          next_state = p_decode_buf  ? st_decode     : p_rf_read_buf ? st_read_rf : st_execute;
+          next_state = fetch_next_state;
         end else begin
           next_state = st_init;
           state_change = 1'b0;
@@ -163,6 +169,9 @@ module cpu_fsm
       end
       st_refetch2: begin
         next_state = p_decode_buf  ? st_decode     : p_rf_read_buf ? st_read_rf : st_execute;
+      end
+      st_fetch_buf: begin
+        next_state = p_decode_buf ? st_decode : p_rf_read_buf ? st_read_rf : st_execute;
       end
       st_decode: begin
         next_state = p_rf_read_buf ? st_read_rf : st_execute;
@@ -199,7 +208,7 @@ module cpu_fsm
             next_state = st_write_back;
           end else begin
             if (!i_ibus_busy) begin // wait for instruction memory to be ready
-              next_state = i_refetch ? st_refetch : p_decode_buf  ? st_decode     : p_rf_read_buf ? st_read_rf : st_execute;
+              next_state = i_refetch ? st_refetch : fetch_next_state;
             end else begin
               next_state = st_memory;
               state_change = 1'b0;
@@ -211,11 +220,11 @@ module cpu_fsm
         end
       end
       st_write_back: begin
-        if (!i_ibus_busy && !(p_prefetch_buf && i_bad_predict)) begin // wait for instruction memory to be ready
+        if (!i_ibus_busy && !(p_branch_pred && i_bad_predict)) begin // wait for instruction memory to be ready
           if (p_wb_buf && !p_decode_buf) begin
             next_state = st_write_back_buf;
           end else begin
-            next_state = i_refetch ? st_refetch : p_decode_buf  ? st_decode     : p_rf_read_buf ? st_read_rf : st_execute; 
+            next_state = i_refetch ? st_refetch : fetch_next_state; 
           end
         end else begin
           next_state = st_write_back;
@@ -223,7 +232,7 @@ module cpu_fsm
         end
       end
       st_write_back_buf: begin
-        next_state = i_refetch ? st_refetch : p_decode_buf  ? st_decode     : p_rf_read_buf ? st_read_rf : st_execute; 
+        next_state = i_refetch ? st_refetch : fetch_next_state; 
       end
       default: begin
         next_state = st_init; 
@@ -266,6 +275,20 @@ module cpu_fsm
         o_en_fetch    = 1'b0;          // fetch the first instruction
         o_update_pc   = 1'b0;
         o_en_decomp   = 1'b1;
+        o_update_comp = 1'b0;
+        o_en_decode   = 1'b0;
+        o_en_rf_rd1   = 1'b0;
+        o_en_rf_rd2   = 1'b0;
+        o_en_exec     = 1'b0;
+        o_en_dmem_wr  = 1'b0;
+        o_en_dmem_rd  = 1'b0;
+        o_en_wb       = 1'b0;
+        o_wb_state    = 1'b0;
+      end
+      st_fetch_buf: begin
+        o_en_fetch    = 1'b0;
+        o_update_pc   = 1'b0;
+        o_en_decomp   = 1'b1;          // instruction word lands in the fetch buffer
         o_update_comp = 1'b0;
         o_en_decode   = 1'b0;
         o_en_rf_rd1   = 1'b0;

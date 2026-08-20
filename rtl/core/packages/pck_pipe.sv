@@ -150,6 +150,7 @@ package pck_pipe;
     sel_br_e      sel_br;                 //! program counter mux selector
     logic         cond_branch;            //! conditionnal branch (ID only)
     logic         jump_reg;               //! jump register (ID only)
+    logic         predicted;              //! predicted taken by the front-end (ID only)
   } pipe_id_t;
 
   //! payload of the EX stage barrier
@@ -234,7 +235,7 @@ package pck_pipe;
   localparam pipe_id_t  PIPE_ID_NOP  = '{
     com: PIPE_COM_NOP, rs: PIPE_RS_NOP, wbc: PIPE_WBC_NOP,
     dec: PIPE_DEC_NOP, mem: PIPE_MEM_NOP,
-    sel_br: br_none, cond_branch: 1'b0, jump_reg: 1'b0
+    sel_br: br_none, cond_branch: 1'b0, jump_reg: 1'b0, predicted: 1'b0
   };
 
   localparam pipe_ex_t  PIPE_EX_NOP  = '{

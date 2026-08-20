@@ -55,8 +55,13 @@ module cpu_core
   parameter p_mul_fast     = 0,           //! fast mul
   parameter p_mul_1_cycle  = 0,           //! one cycle mul
 
+  //! branch prediction scheme (shared with the multi-cycle core):
+  //!   0 = off, 1 = static (backward taken / forward not taken).
+  //! Higher values are reserved for the dynamic predictors to come.
+  parameter p_branch_pred  = 0,           //! branch prediction scheme
+
   // non pipeline settings:
-  parameter p_prefetch_buf = 0,           //! use a prefetch buffer
+  parameter p_fetch_buf    = 0,           //! add buffers to fetch stage output
   parameter p_decode_buf   = 0,           //! add buffers to decode stage outputs
   parameter p_rf_sp        = 0,           //! register file is a single port ram
   parameter p_rf_read_buf  = 0,           //! register file has synchronous read
@@ -311,7 +316,8 @@ module cpu_core
   cpu_fsm #(
     .p_rf_sp        ( p_rf_sp         ),
     .p_rf_read_buf  ( p_rf_read_buf   ),
-    .p_prefetch_buf ( p_prefetch_buf  ),
+    .p_branch_pred  ( p_branch_pred   ),
+    .p_fetch_buf    ( p_fetch_buf     ),
     .p_decode_buf   ( p_decode_buf    ),
     .p_mem_buf      ( p_mem_buf       ),
     .p_branch_buf   ( p_branch_buf    ),
@@ -354,7 +360,8 @@ module cpu_core
   `KEEP_HIERARCHY
   cpu_fetch #(
     .p_reset_vector ( p_reset_vector  ),
-    .p_prefetch_buf ( p_prefetch_buf  ),
+    .p_branch_pred  ( p_branch_pred   ),
+    .p_fetch_buf    ( p_fetch_buf     ),
     .p_branch_buf   ( p_branch_buf    ),
     .p_counters     ( p_counters      )
   ) fetch_stage (

@@ -40,27 +40,31 @@ module cpu_static_branch_predictor
   input  wire          i_jalr_instr,      //! jalr instruction
   input  wire  [31: 0] i_imm,             //! immediate value
   input  wire  [31: 0] i_pc,              //! program counter
-  output wire  [31: 0] o_predicted_pc     //! predicted pc value
+  output wire  [31: 0] o_predicted_pc,    //! predicted pc value
+  output wire          o_predict_taken    //! the control transfer is predicted taken
 );
   
   logic [31: 0] predicted_pc;
+  logic         predict_taken;
+
+  //! the heuristic itself: an unconditional jump whose target is known from the
+  //! instruction alone is always taken, a conditional branch is taken when it
+  //! goes backwards (loop), and `jalr` -- whose target needs a register value --
+  //! is never predicted.
+  always_comb begin: predict
+    predict_taken = i_branch_instr & ~i_jalr_instr & (~i_cond_branch | i_imm[31]);
+  end
 
   always_comb begin: program_counter
-    if (i_branch_instr) begin
-      if (i_jalr_instr) begin
-        predicted_pc = i_pc + 4;
-      // if backward branch (i_imm < 0): predict branch is taken 
-      end else if (!i_cond_branch || $signed(i_imm) < 0) begin
-        predicted_pc = i_pc + $signed(i_imm);
-      end else begin
-        predicted_pc = i_pc + 4;
-      end
+    if (predict_taken) begin
+      predicted_pc = i_pc + $signed(i_imm);
     end else begin
       predicted_pc = i_pc + 4;
     end
   end
 
-  assign o_predicted_pc = predicted_pc;
+  assign o_predicted_pc  = predicted_pc;
+  assign o_predict_taken = predict_taken;
 
 endmodule
 

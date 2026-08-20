@@ -77,8 +77,13 @@ module cpu_core_pipe
   parameter p_early_jal    = 1,           //! resolve `jal` from the decoder instead of the RF slot
   parameter p_redirect_buf = 1,           //! register the redirection target before the fetch stage
 
+  //! branch prediction scheme (shared with the multi-cycle core):
+  //!   0 = off, 1 = static (backward taken / forward not taken).
+  //! Higher values are reserved for the dynamic predictors to come.
+  parameter p_branch_pred  = 0,           //! branch prediction scheme
+
   // non pipeline settings:
-  parameter p_prefetch_buf = 0,           //! use a prefetch buffer
+  parameter p_fetch_buf    = 0,           //! add buffers to fetch stage output
   parameter p_decode_buf   = 0,           //! add buffers to decode stage outputs
   parameter p_rf_sp        = 0,           //! register file is a single port ram
   parameter p_rf_read_buf  = 0,           //! register file has synchronous read
@@ -366,6 +371,9 @@ module cpu_core_pipe
   wire          br_instr_bp;              //! conditionnal branch (inconditionnal branches jal and jalr are excluded) (unregistered)
   wire          cond_br_bp;               //! branch instruction (unregistered)
   wire          jalr_instr_bp;            //! jalr instruction (unregistered)
+  wire          predict_taken;            //! the IC slot instruction is predicted taken (unregistered)
+  wire          predict_IC;               //! prediction offered to the hazard unit
+  wire          predicted_RF;             //! the RF slot instruction was predicted taken
   logic         jump_reg;                 //! jump register
   logic [31: 0] csr_rd_data;
 
@@ -576,6 +584,7 @@ module cpu_core_pipe
     .p_stage_MA         ( p_stage_MA            ),
     .p_stage_WB         ( p_stage_WB            ),
     .p_early_jal        ( p_early_jal           ),
+    .p_branch_pred      ( p_branch_pred         ),
     .p_redirect_buf     ( p_redirect_buf        ),
     .p_n_fwd            ( N_FWD                 )
   ) hazard_unit (
@@ -584,6 +593,9 @@ module cpu_core_pipe
 
     .i_valid_IC         ( valid_IC              ),
     .i_valid_RF         ( valid_RF              ),
+
+    .i_predict_IC       ( predict_IC            ),
+    .i_predicted_RF     ( predicted_RF          ),
 
     .i_rd1_addr_RF      ( rf_rd1_addr_RF        ),
     .i_rd2_addr_RF      ( rf_rd2_addr_RF        ),
@@ -662,8 +674,13 @@ module cpu_core_pipe
     for by `cpu_hazard`) for a shorter combinational path.
   *******************************************************/
 
-  wire  [31: 0] redirect_pc_RF = (sel_pc == pc_alu) ? (alu_out & 32'hfffffffe)
-                                                    : (pc_RF + $signed(imm_RF));
+  //! with `p_branch_pred` the RF slot also redirects when a branch predicted
+  //! taken turns out not to be: the recovery target is then the sequential
+  //! address, which is where the front-end should have gone in the first place
+  wire  [31: 0] redirect_pc_taken = (sel_pc == pc_alu) ? (alu_out & 32'hfffffffe)
+                                                       : (pc_RF + $signed(imm_RF));
+  wire  [31: 0] redirect_pc_RF = ((p_branch_pred != 0) & ~branch_taken) ? pc_inc_RF
+                                                                       : redirect_pc_taken;
   wire  [31: 0] redirect_pc_IC = pc_IC + $signed(imm);
 
   assign redirect_pc = redirect_early ? redirect_pc_IC : redirect_pc_RF;
@@ -858,6 +875,38 @@ module cpu_core_pipe
     .o_jump_reg     ( jump_reg              )
   );
 
+  /*******************************************************
+    Branch prediction (`p_branch_pred`)
+
+    The predictor sits on the decoder outputs, at the IC slot, which is where
+    `p_early_jal` already resolves `jal`: everything it needs -- the kind of
+    control transfer and the branch immediate -- is available there, and the
+    predicted target is the same `pc_IC + imm` the early `jal` path computes.
+    A prediction is therefore just an early redirection like any other, and the
+    only thing the rest of the pipeline has to remember is the `predicted` bit
+    riding with the instruction down to the RF slot, where `cpu_hazard` compares
+    it to the verdict of the execute unit.
+  *******************************************************/
+
+  generate
+    if (p_branch_pred == 1) begin : g_branch_pred  // static prediction
+      cpu_static_branch_predictor branch_predictor (
+        .i_cond_branch  ( cond_br_bp            ),
+        .i_branch_instr ( br_instr_bp           ),
+        .i_jalr_instr   ( jalr_instr_bp         ),
+        .i_imm          ( imm_bp                ),
+        .i_pc           ( pc_IC                 ),
+        .o_predicted_pc (                       ),
+        .o_predict_taken( predict_taken         )
+      );
+    end else begin : g_branch_pred
+      assign predict_taken = 1'b0;
+    end
+  endgenerate
+
+  assign predict_IC   = predict_taken;
+  assign predicted_RF = ctrl_RF.predicted;
+
   //! bubble injected in the ID barrier at reset
   function automatic pipe_id_t id_reset();
     id_reset        = PIPE_ID_NOP;
@@ -905,6 +954,7 @@ module cpu_core_pipe
     ctrl_ID_n.sel_br           = sel_br;
     ctrl_ID_n.cond_branch      = cond_branch;
     ctrl_ID_n.jump_reg         = jump_reg;
+    ctrl_ID_n.predicted        = predict_IC;
   end
 
   generate
