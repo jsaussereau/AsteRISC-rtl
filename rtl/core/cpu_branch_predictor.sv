@@ -68,7 +68,7 @@ module cpu_branch_predictor
   wire          cond_br_bp;
   wire          br_instr_bp;
   logic         jalr_instr_bp;
-  wire          imm_bp;
+  wire  [31: 0] imm_bp;
 
   instr_type_e  instr_type;
   logic [31: 0] imm;
