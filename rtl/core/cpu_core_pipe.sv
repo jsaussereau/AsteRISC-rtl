@@ -60,6 +60,11 @@ module cpu_core_pipe
   parameter p_mul_fast     = 0,           //! fast mul
   parameter p_mul_1_cycle  = 0,           //! one cycle mul
 
+  // ALU micro-architecture (see `cpu_alu`): these do not move a register
+  // barrier, they change what stands between two barriers.
+  parameter p_alu_share_adder = 0,        //! sub/slt/sltu and the branch comparators reuse the main adder
+  parameter p_alu_shift_bits  = 32,       //! bits shifted per cycle: 32 = barrel shifter, 1/2/4/8/16 = sequential
+
   // pipeline settings: number of barriers of each pipeline group.
   // 0 collapses the group (its slot becomes a combinational alias of the slot
   // upstream), 1 is a plain pipeline stage, N > 1 spreads the group logic over
@@ -76,6 +81,19 @@ module cpu_core_pipe
   // pipeline control settings:
   parameter p_early_jal    = 1,           //! resolve `jal` from the decoder instead of the RF slot
   parameter p_redirect_buf = 1,           //! register the redirection target before the fetch stage
+
+  //! slot at which a resolved control transfer is acted upon (see `cpu_hazard`):
+  //!   0 = the RF slot, 1 = the EX slot (one more bubble per redirection, but
+  //!   the whole redirection fan-out leaves the RF critical path)
+  parameter p_branch_stage = 0,           //! branch resolution slot
+
+  // operand forwarding: each group of in-flight writes may or may not be
+  // bypassed towards the RF slot. Clearing one shortens the bypass mux in front
+  // of the ALU and pays for it with load-use style stalls (see `cpu_hazard`).
+  parameter p_fwd_ex       = 1,           //! bypass from the EX barriers
+  parameter p_fwd_ma       = 1,           //! bypass from the MA barriers
+  parameter p_fwd_wb       = 1,           //! bypass from the WB barriers
+  parameter p_fwd_pw       = 1,           //! bypass from the pending register file write
 
   //! branch prediction scheme (shared with the multi-cycle core):
   //!   0 = off, 1 = static (backward taken / forward not taken).
@@ -176,6 +194,22 @@ module cpu_core_pipe
   localparam int  OFF_WB     = OFF_MA + N_FWD_MA;
   localparam int  OFF_PW     = OFF_WB + N_FWD_WB;
 
+  //! `p_fwd_*` expressed over the flat entry list `cpu_hazard` reasons about. A
+  //! clear bit does not remove the entry -- the read-after-write is still
+  //! detected -- it only forbids bypassing from it, which turns the hazard into
+  //! a stall.
+  function automatic logic [31: 0] fwd_mask_build();
+    logic [31: 0] m;
+    m = 32'd0;
+    for (int k = 0; k < N_FWD_EX; k++) m[OFF_EX + k] = (p_fwd_ex != 0);
+    for (int k = 0; k < N_FWD_MA; k++) m[OFF_MA + k] = (p_fwd_ma != 0);
+    for (int k = 0; k < N_FWD_WB; k++) m[OFF_WB + k] = (p_fwd_wb != 0);
+    if (N_FWD_PW != 0)                 m[OFF_PW    ] = (p_fwd_pw != 0);
+    return m;
+  endfunction
+
+  localparam logic [31: 0] FWD_MASK = fwd_mask_build();
+
   //! instructions that may sit between the RF slot and retirement
   localparam int  N_INFLIGHT = p_stage_EX + p_stage_MA + p_stage_WB;
   localparam int  W_INFLIGHT = $clog2(N_INFLIGHT + 1);
@@ -222,6 +256,7 @@ module cpu_core_pipe
   logic         flush_IC;
   logic         squash_IC;                //! every IC barrier holds a wrong-path instruction
   logic         squash_ID;                //! every ID barrier holds a wrong-path instruction
+  logic         squash_EX;                //! every EX barrier holds a wrong-path instruction
   logic         flush_ID;
   logic         flush_RF;
   logic         flush_EX;
@@ -444,6 +479,10 @@ module cpu_core_pipe
   wire [31: 0] copro_out2_EX   = ctrl_EX.dat.copro_out2;
   wire         exec_done_EX    = ctrl_EX.dat.exec_done;
   wire         branch_taken_EX = ctrl_EX.dat.branch_taken;
+  //! control transfer verdict resolved at the RF slot and carried here, acted
+  //! upon by `cpu_hazard` instead of the RF verdict when `p_branch_stage` is set
+  wire         redirect_req_EX = ctrl_EX.dat.redirect_req;
+  wire [31: 0] redirect_pc_EX  = ctrl_EX.dat.redirect_pc;
 
   //! a collapsed EX slot is a combinational alias of the RF slot, so a frozen
   //! RF slot keeps presenting the same access to the data memory every cycle.
@@ -586,7 +625,9 @@ module cpu_core_pipe
     .p_early_jal        ( p_early_jal           ),
     .p_branch_pred      ( p_branch_pred         ),
     .p_redirect_buf     ( p_redirect_buf        ),
-    .p_n_fwd            ( N_FWD                 )
+    .p_branch_stage     ( p_branch_stage        ),
+    .p_n_fwd            ( N_FWD                 ),
+    .p_fwd_mask         ( FWD_MASK              )
   ) hazard_unit (
     .i_clk              ( i_clk                 ),
     .i_rst              ( i_rst                 ),
@@ -594,6 +635,7 @@ module cpu_core_pipe
     .i_valid_IC         ( valid_IC              ),
     .i_valid_RF         ( valid_RF              ),
 
+    .i_valid_EX         ( valid_EX              ),
     .i_predict_IC       ( predict_IC            ),
     .i_predicted_RF     ( predicted_RF          ),
 
@@ -609,6 +651,7 @@ module cpu_core_pipe
     .i_sel_br_IC        ( sel_br                ),
     .i_sel_br_RF        ( sel_br_RF             ),
     .i_branch_taken_RF  ( branch_taken          ),
+    .i_redirect_req_EX  ( redirect_req_EX       ),
     .i_exec_done_RF     ( exec_done             ),
 
     .o_en_IF            ( en_IF                 ),
@@ -628,6 +671,7 @@ module cpu_core_pipe
     .o_flush_WB         ( flush_WB              ),
     .o_squash_IC        ( squash_IC             ),
     .o_squash_ID        ( squash_ID             ),
+    .o_squash_EX        ( squash_EX             ),
 
     .o_redirect         ( redirect              ),
     .o_redirect_early   ( redirect_early        ),
@@ -683,7 +727,23 @@ module cpu_core_pipe
                                                                        : redirect_pc_taken;
   wire  [31: 0] redirect_pc_IC = pc_IC + $signed(imm);
 
-  assign redirect_pc = redirect_early ? redirect_pc_IC : redirect_pc_RF;
+  //! The verdict itself, computed where the operands are: the execute unit sits
+  //! at the RF slot and nothing can resolve a conditional branch earlier. What
+  //! `p_branch_stage` moves is not this computation but the moment it is acted
+  //! upon, so the request is built here in both configurations and simply
+  //! registered into the EX barrier when the late slot is selected.
+  //!
+  //! The validity and freeze qualifications are deliberately left out: they
+  //! belong to the slot the request is consumed in, and `cpu_hazard` applies
+  //! them there.
+  wire          mispredict_RF_c = (p_branch_pred != 0) ? (branch_taken ^ predicted_RF)
+                                                       :  branch_taken;
+  wire          redirect_req_RF = mispredict_RF_c
+                                & ~((p_early_jal != 0) & (sel_br_RF == br_jal));
+
+  assign redirect_pc = redirect_early        ? redirect_pc_IC
+                     : (p_branch_stage != 0) ? redirect_pc_EX
+                     :                         redirect_pc_RF;
 
   generate
     if (p_redirect_buf) begin : g_redirect_buf
@@ -1130,7 +1190,9 @@ module cpu_core_pipe
     .p_branch_buf   ( 0                     ),
     .p_ext_rvm      ( p_ext_rvm             ),
     .p_mul_fast     ( p_mul_fast            ),
-    .p_mul_1_cycle  ( p_mul_1_cycle         )
+    .p_mul_1_cycle  ( p_mul_1_cycle         ),
+    .p_alu_share_adder ( p_alu_share_adder  ),
+    .p_alu_shift_bits  ( p_alu_shift_bits   )
   ) exec_stage (
     .i_clk          ( i_clk                 ),
     .i_rst          ( i_rst                 ),
@@ -1190,6 +1252,8 @@ module cpu_core_pipe
     ctrl_EX_n.dat.exec_done    = exec_done;
     ctrl_EX_n.dat.branch_taken = branch_taken;
     ctrl_EX_n.dat.sel_pc       = sel_pc;
+    ctrl_EX_n.dat.redirect_req = redirect_req_RF;
+    ctrl_EX_n.dat.redirect_pc  = redirect_pc_RF;
     ctrl_EX_n.bp.rs1_ex        = bp_rs1_ex;
     ctrl_EX_n.bp.rs1_ma        = bp_rs1_ma;
     ctrl_EX_n.bp.rs1_wb        = bp_rs1_wb;
@@ -1214,7 +1278,7 @@ module cpu_core_pipe
           if (i_rst) begin
             ctrl_EX_c [k] <= ex_reset();
             valid_EX_c[k] <= 1'b0;
-          end else if ((k == 0) & flush_EX) begin
+          end else if ((k == 0) ? flush_EX : squash_EX) begin
             ctrl_EX_c [k] <= ex_bubble(ctrl_EX_c[k]);
             valid_EX_c[k] <= 1'b0;
           end else if (en_EX) begin

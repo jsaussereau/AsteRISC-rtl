@@ -55,6 +55,11 @@ module cpu_core
   parameter p_mul_fast     = 0,           //! fast mul
   parameter p_mul_1_cycle  = 0,           //! one cycle mul
 
+  // ALU micro-architecture (see `cpu_alu`): these do not move a register
+  // barrier, they change what stands between two barriers.
+  parameter p_alu_share_adder = 0,        //! sub/slt/sltu and the branch comparators reuse the main adder
+  parameter p_alu_shift_bits  = 32,       //! bits shifted per cycle: 32 = barrel shifter, 1/2/4/8/16 = sequential
+
   //! branch prediction scheme (shared with the multi-cycle core):
   //!   0 = off, 1 = static (backward taken / forward not taken).
   //! Higher values are reserved for the dynamic predictors to come.
@@ -522,7 +527,9 @@ module cpu_core
     .p_branch_buf   ( p_branch_buf    ),
     .p_ext_rvm      ( p_ext_rvm       ),
     .p_mul_fast     ( p_mul_fast      ),
-    .p_mul_1_cycle  ( p_mul_1_cycle   )
+    .p_mul_1_cycle  ( p_mul_1_cycle   ),
+    .p_alu_share_adder ( p_alu_share_adder ),
+    .p_alu_shift_bits  ( p_alu_shift_bits  )
   ) exec_stage (
     .i_clk          ( i_clk           ),
     .i_rst          ( i_rst           ),

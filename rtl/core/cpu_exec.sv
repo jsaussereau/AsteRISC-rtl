@@ -38,7 +38,9 @@ module cpu_exec
   parameter p_branch_buf   = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
   parameter p_ext_rvm      = 1,           //! use RV32M extension (multiplication and division)
   parameter p_mul_fast     = 0,           //! fast mul
-  parameter p_mul_1_cycle  = 0            //! one cycle mul
+  parameter p_mul_1_cycle  = 0,           //! one cycle mul
+  parameter p_alu_share_adder = 0,        //! sub/slt/sltu and the branch comparators reuse the main adder
+  parameter p_alu_shift_bits  = 32        //! bits shifted per cycle: 32 = barrel shifter, 1/2/4/8/16 = sequential
 )(
   input  wire          i_clk,             //! global clock
   input  wire          i_rst,             //! global reset
@@ -75,6 +77,7 @@ module cpu_exec
   wire          null_out;                 //! ALU result is equal to 0
 
   logic         md_exec_done;             //! MUL/DIV execusion done: data valid
+  wire          alu_exec_done;            //! ALU execution done: data valid (sequential shifter)
   logic         mul_en;                   //! MUL enable
   logic         div_en;                   //! DIV enable
   logic         alu_use_md;               //! use muldiv opa and opb outputs as ALU input
@@ -147,8 +150,13 @@ module cpu_exec
   //! ALU: Arithmetic Logic Unit
   `KEEP_HIERARCHY
   cpu_alu #(
-    .p_ext_rvm     ( p_ext_rvm       )
+    .p_ext_rvm         ( p_ext_rvm         ),
+    .p_alu_share_adder ( p_alu_share_adder ),
+    .p_alu_shift_bits  ( p_alu_shift_bits  )
   ) alu (
+    .i_clk         ( i_clk           ),
+    .i_rst         ( i_rst           ),
+    .i_start       ( i_en_exec       ),
     .i_op_a        ( alu_op_a        ),
     .i_op_b        ( alu_op_b        ),
     .i_op_a_md     ( alu_op_a_md     ),
@@ -158,6 +166,7 @@ module cpu_exec
     .o_adder_out   ( alu_adder_out   ),
     .o_adder_fout  ( alu_adder_fout  ),
     .o_out         ( alu_out         ),
+    .o_done        ( alu_exec_done   ),
     .o_null_out    ( alu_null_out    ),
     .o_ops_eq      ( br_cond_eq      ),
     .o_ops_lt      ( br_cond_lt      ),
@@ -190,7 +199,7 @@ module cpu_exec
   //! exec done
   always_comb begin: execution_done
     case (sel_wb)
-      wb_alu    : o_exec_done = 1'b1;
+      wb_alu    : o_exec_done = alu_exec_done;
       wb_muldiv : o_exec_done = md_exec_done;
       //wb_copro0 : o_exec_done = 1'b1; //TODO: connect to coprocessor
       //wb_copro1 : o_exec_done = 1'b1; //TODO: connect to coprocessor

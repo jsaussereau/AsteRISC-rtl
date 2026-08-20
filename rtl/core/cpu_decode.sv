@@ -377,7 +377,7 @@ module cpu_decode
         instr_name       = isa_beq;
         instr_type       = instr_b;
         sel_br           = br_beq;
-        sel_alu_op       = alu_add;
+        sel_alu_op       = alu_sub;  // the comparators read the subtraction (see `p_alu_share_adder`)
         sel_alu_opa      = opa_rf;
         sel_alu_opb      = opb_rf;
         rf_rd2_used      = `YES;
@@ -386,7 +386,7 @@ module cpu_decode
         instr_name       = isa_bne;
         instr_type       = instr_b;
         sel_br           = br_bne;
-        sel_alu_op       = alu_add;
+        sel_alu_op       = alu_sub;  // the comparators read the subtraction (see `p_alu_share_adder`)
         sel_alu_opa      = opa_rf;
         sel_alu_opb      = opb_rf;
         rf_rd2_used      = `YES;
@@ -395,7 +395,7 @@ module cpu_decode
         instr_name       = isa_blt;
         instr_type       = instr_b;
         sel_br           = br_blt;
-        sel_alu_op       = alu_add;
+        sel_alu_op       = alu_sub;  // the comparators read the subtraction (see `p_alu_share_adder`)
         sel_alu_opa      = opa_rf;
         sel_alu_opb      = opb_rf;
         rf_rd2_used      = `YES;
@@ -404,7 +404,7 @@ module cpu_decode
         instr_name       = isa_bge;
         instr_type       = instr_b;
         sel_br           = br_bge;
-        sel_alu_op       = alu_add;
+        sel_alu_op       = alu_sub;  // the comparators read the subtraction (see `p_alu_share_adder`)
         sel_alu_opa      = opa_rf;
         sel_alu_opb      = opb_rf;
         rf_rd2_used      = `YES;
@@ -413,7 +413,7 @@ module cpu_decode
         instr_name       = isa_bltu;
         instr_type       = instr_b;
         sel_br           = br_bltu;
-        sel_alu_op       = alu_add;
+        sel_alu_op       = alu_sub;  // the comparators read the subtraction (see `p_alu_share_adder`)
         sel_alu_opa      = opa_rf;
         sel_alu_opb      = opb_rf;
         rf_rd2_used      = `YES;
@@ -422,7 +422,7 @@ module cpu_decode
         instr_name       = isa_bgeu;
         instr_type       = instr_b;
         sel_br           = br_bgeu;
-        sel_alu_op       = alu_add;
+        sel_alu_op       = alu_sub;  // the comparators read the subtraction (see `p_alu_share_adder`)
         sel_alu_opa      = opa_rf;
         sel_alu_opb      = opb_rf;
         rf_rd2_used      = `YES;

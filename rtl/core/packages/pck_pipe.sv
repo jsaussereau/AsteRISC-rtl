@@ -134,6 +134,11 @@ package pck_pipe;
     logic         exec_done;              //! execute stage done
     logic         branch_taken;           //! a branch is taken
     sel_pc_e      sel_pc;                 //! program counter select
+    //! control transfer verdict resolved at the RF slot. It is carried down so
+    //! that `p_branch_stage` can act upon it at the EX slot instead, which
+    //! takes the whole redirection fan-out off the RF critical path.
+    logic         redirect_req;           //! the front-end must be redirected
+    logic [31: 0] redirect_pc;            //! resolved redirection target
   } pipe_dat_t;
 
   /*****************************************************

@@ -79,6 +79,32 @@
 //!    set that needs no parameter-dependent wording, because a barrier that does
 //!    not exist has nothing to flush and ignores the request.
 //!
+//! ## Branch resolution slot (`p_branch_stage`)
+//!
+//! Resolving a control transfer costs a path that starts at the branch
+//! comparators and ends at the enable and flush of every front-end barrier and
+//! at the instruction memory address. That path is very often the critical one,
+//! and it is entirely a *placement* choice: nothing forces the verdict to be
+//! acted upon in the slot that produced it.
+//!
+//! `p_branch_stage` moves the acting point one group downstream:
+//!
+//! | value | verdict acted upon at | cost                                |
+//! |-------|-----------------------|-------------------------------------|
+//! | 0     | the RF slot           | none (default)                      |
+//! | 1     | the EX slot           | one extra bubble per redirection    |
+//!
+//! The verdict and its target are still *computed* at the RF slot -- they need
+//! the register operands -- but they are carried down the EX barrier as
+//! `redirect_req` / `redirect_pc` and only acted upon at the EX slot. What the
+//! parameter removes from the RF cycle is therefore the whole fan-out of the
+//! decision, which is the expensive half, while the comparators themselves keep
+//! a full cycle to settle before their result is registered.
+//!
+//! This is the pipelined counterpart of `p_branch_buf` in the multi-cycle core,
+//! and it composes with `p_branch_pred`: with prediction on, the extra bubble is
+//! only paid on a mispredict.
+//!
 //! ## Operand forwarding
 //!
 //! Forwarding is not written per named slot: `cpu_core_pipe` presents a flat,
@@ -89,6 +115,22 @@
 //! one read-after-write that forwarding cannot cover, hence the one stall. That
 //! single rule replaces the hand-written EX/MA/WB/pending-write cases and scales
 //! to any group depth for free.
+//!
+//! `p_fwd_mask` makes each entry *optional*. A masked-out entry is still
+//! detected as a producer, it simply cannot be forwarded from, so the consumer
+//! stalls until the write has committed instead. That is the canonical CPI /
+//! critical path trade: the bypass network is an `N_FWD + 1`-way mux sitting
+//! directly in front of the ALU operands, so dropping its deepest inputs
+//! shortens the RF path at the cost of stalls whose frequency depends entirely
+//! on the code -- which is why it has to be measured rather than reasoned about.
+//!
+//! Masking is safe for any entry because the stall it substitutes lasts exactly
+//! as long as the entry is listed, and an entry is listed until its write is
+//! architecturally visible: the register file read address is held during a
+//! stall (see `cpu_core_pipe`), so the operands are re-read every stalled cycle
+//! and pick the committed value up by themselves. No entry can be masked into a
+//! deadlock either, since freezing the RF slot never freezes anything
+//! downstream of it -- the producers always drain.
 //!
 //! Side effects (register write, memory write, redirection, retirement) are
 //! gated by the slot `valid` bits in `cpu_core_pipe`, so a killed instruction is
@@ -120,7 +162,13 @@ module cpu_hazard
   //! Higher values are reserved for the dynamic predictors to come.
   parameter p_branch_pred  = 0,           //! branch prediction scheme
   parameter p_redirect_buf = 1,           //! register the redirection target before the fetch stage
-  parameter p_n_fwd        = 3            //! number of in-flight register writes presented by the core
+  //! slot at which a resolved control transfer is acted upon:
+  //!   0 = the RF slot (default), 1 = the EX slot (one more bubble, shorter path)
+  parameter p_branch_stage = 0,           //! branch resolution slot
+  parameter p_n_fwd        = 3,           //! number of in-flight register writes presented by the core
+  //! one bit per forwarding entry, in the order the core presents them. A clear
+  //! bit turns that entry into a stall instead of a bypass.
+  parameter logic [31: 0] p_fwd_mask = 32'hffff_ffff
 )(
   input  wire          i_clk,             //! global clock
   input  wire          i_rst,             //! global reset
@@ -128,6 +176,7 @@ module cpu_hazard
   // slot occupancy
   input  wire          i_valid_IC,        //! the IC slot holds a real instruction
   input  wire          i_valid_RF,        //! the RF slot holds a real instruction
+  input  wire          i_valid_EX,        //! the EX slot holds a real instruction (`p_branch_stage`)
 
   // branch prediction (`p_branch_pred`)
   input  wire          i_predict_IC,      //! the IC slot holds a branch predicted taken
@@ -149,6 +198,9 @@ module cpu_hazard
   input  sel_br_e      i_sel_br_IC,       //! branch class decoded from the IC slot
   input  sel_br_e      i_sel_br_RF,       //! branch class of the RF slot
   input  wire          i_branch_taken_RF, //! the RF slot takes its branch
+  //! redirection request resolved at the RF slot and carried down the EX
+  //! barrier, used instead of the RF verdict when `p_branch_stage` is set
+  input  wire          i_redirect_req_EX, //! the EX slot instruction must redirect the front-end
   input  wire          i_exec_done_RF,    //! the execute unit has a result for the RF slot
 
   // pipeline flow control
@@ -169,6 +221,7 @@ module cpu_hazard
   output logic         o_flush_WB,        //! load a bubble into the WB barriers
   output logic         o_squash_IC,       //! every IC barrier is younger than a resolved branch
   output logic         o_squash_ID,       //! every ID barrier is younger than a resolved branch
+  output logic         o_squash_EX,       //! every EX barrier is younger than a resolved branch (`p_branch_stage`)
 
   // redirection
   output logic         o_redirect,        //! redirect the fetch stage this cycle
@@ -199,6 +252,19 @@ module cpu_hazard
   //! a wrong-path word repeats with it and the shadow has to wait too.
   localparam int  REDIRECT_SHADOW = 1 + p_redirect_buf;
   localparam int  SHADOW_W        = (REDIRECT_SHADOW < 2) ? 1 : 2;
+
+  //! act upon a resolved control transfer at the EX slot rather than the RF slot
+  localparam logic RESOLVE_AT_EX  = (p_branch_stage != 0);
+
+  //! forwarding entries the core is allowed to bypass from
+  wire [p_n_fwd-1: 0] fwd_allowed = p_fwd_mask[p_n_fwd-1: 0];
+
+  initial begin
+    assert (p_n_fwd <= 32)
+      else $error("p_fwd_mask holds one bit per forwarding entry, so p_n_fwd must be <= 32");
+    assert ((p_branch_stage == 0) || (p_stage_EX >= 1))
+      else $error("p_branch_stage = 1 needs at least one EX barrier, otherwise the EX slot is the RF slot");
+  end
 
   /*******************************************************
     Read after write
@@ -246,11 +312,15 @@ module cpu_hazard
   //! load still in flight cannot: the data memory is read from the EX slot and
   //! its result only exists at the MA slot, which is the one read-after-write
   //! forwarding cannot cover, hence the one stall.
-  assign o_fwd_rs1 = sel_rs1 &  i_fwd_ready;
-  assign o_fwd_rs2 = sel_rs2 &  i_fwd_ready;
+  //! an entry can be bypassed from when it already holds its result *and* the
+  //! configuration keeps its bypass path. Anything else becomes a stall.
+  wire [p_n_fwd-1: 0] fwd_usable = i_fwd_ready & fwd_allowed;
 
-  wire          stall_rs1 = |(sel_rs1 & ~i_fwd_ready);
-  wire          stall_rs2 = |(sel_rs2 & ~i_fwd_ready);
+  assign o_fwd_rs1 = sel_rs1 &  fwd_usable;
+  assign o_fwd_rs2 = sel_rs2 &  fwd_usable;
+
+  wire          stall_rs1 = |(sel_rs1 & ~fwd_usable);
+  wire          stall_rs2 = |(sel_rs2 & ~fwd_usable);
 
   assign o_stall_rs1 = stall_rs1;
   assign o_stall_rs2 = stall_rs2;
@@ -307,14 +377,27 @@ module cpu_hazard
   wire          mispredict_RF = (p_branch_pred != 0) ? (i_branch_taken_RF ^ i_predicted_RF)
                                                      :  i_branch_taken_RF;
 
+  //! the verdict as produced by the execute unit, in the slot that produced it
   wire          redirect_RF = i_valid_RF
                             & ~freeze_RF
                             & mispredict_RF
                             & ~((p_early_jal != 0) & (i_sel_br_RF == br_jal));
 
-  //! an older instruction always wins: the RF slot is downstream of the IC slot
-  assign o_redirect       = redirect_RF | redirect_IC;
-  assign o_redirect_early = redirect_IC & ~redirect_RF;
+  //! the same verdict, registered in the EX barrier and acted upon one group
+  //! later. `i_redirect_req_EX` already carries the `p_early_jal` and
+  //! `p_branch_pred` qualifications, which are resolved where they are cheap.
+  wire          redirect_EX = i_valid_EX
+                            & ~freeze_EX
+                            & i_redirect_req_EX;
+
+  //! whichever of the two the configuration selects. Only one is ever built:
+  //! the other side of the mux is a constant at elaboration.
+  wire          redirect_late = RESOLVE_AT_EX ? redirect_EX : redirect_RF;
+
+  //! an older instruction always wins: the resolving slot is downstream of the
+  //! IC slot, so a late redirection overrides an early one
+  assign o_redirect       = redirect_late | redirect_IC;
+  assign o_redirect_early = redirect_IC & ~redirect_late;
 
   always_ff @(posedge i_clk) begin: redirect_shadow
     if (i_rst) begin
@@ -364,13 +447,20 @@ module cpu_hazard
   //! `o_flush_<X>` is the head request (both reasons), `o_squash_<X>` the one
   //! the deeper barriers obey. With a single barrier the two coincide, which is
   //! why this distinction was invisible until now.
-  assign o_squash_IC = redirect_RF | redirect_IC;
-  assign o_squash_ID = redirect_RF;
+  //! Everything strictly younger than the resolving instruction dies. Moving
+  //! the resolution to the EX slot simply adds one group to that set: the RF
+  //! group, whose barriers hold instructions fetched after the branch, and the
+  //! EX group itself -- squashing an EX barrier kills what it is *about* to
+  //! latch, and the resolving instruction has already left for the MA barrier
+  //! on the same edge, so it survives and still retires.
+  assign o_squash_IC = redirect_late | redirect_IC;
+  assign o_squash_ID = redirect_late;
+  assign o_squash_EX = redirect_late & RESOLVE_AT_EX;
 
-  assign o_flush_IF = redirect_RF | redirect_IC;
+  assign o_flush_IF = redirect_late | redirect_IC;
   assign o_flush_IC = (freeze_IF & ~freeze_IC) | o_squash_IC;
   assign o_flush_ID = (freeze_IC & ~freeze_ID) | o_squash_ID;
-  assign o_flush_RF = (freeze_ID & ~freeze_RF) | redirect_RF;
+  assign o_flush_RF = (freeze_ID & ~freeze_RF) | redirect_late;
   //! When a group is empty, its slot is a combinational alias of the slot
   //! upstream: the flush request it receives goes nowhere, and the freeze it
   //! would have reported never happens. The next barrier downstream must
@@ -378,7 +468,7 @@ module cpu_hazard
   //! barriered, or it would latch the same payload every stalled cycle.
   wire          freeze_ex_eff = (p_stage_EX != 0) ? freeze_EX : freeze_RF;
 
-  assign o_flush_EX = (freeze_RF     & ~freeze_EX);
+  assign o_flush_EX = (freeze_RF     & ~freeze_EX) | o_squash_EX;
   assign o_flush_MA = (freeze_ex_eff & ~freeze_MA);
   assign o_flush_WB = (freeze_MA     & ~freeze_WB);
 
