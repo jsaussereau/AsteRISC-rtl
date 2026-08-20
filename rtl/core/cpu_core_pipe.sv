@@ -141,6 +141,7 @@ module cpu_core_pipe
   logic         en_IF;
   logic         en_IC;
   logic         en_ID;
+  logic         hold_fetch_addr;
   logic         en_ID_reg;
   logic         en_ID_instr;
   logic         en_RF;
@@ -468,7 +469,19 @@ module cpu_core_pipe
   wire  [31: 0] debug_rs2_data   = rf_rd2_data_WB;
   wire  [31: 0] debug_pc         = pc_WB;
   wire  [63: 0] debug_instret    = minstret_WB;
-  wire          debug_valid      = valid_WB;
+  logic [63: 0] debug_instret_reported;
+  logic         debug_reported;
+  always_ff @(posedge i_clk) begin
+    if (i_rst) begin
+      debug_reported         <= 1'b0;
+      debug_instret_reported <= 64'd0;
+    end else if (valid_WB) begin
+      debug_reported         <= 1'b1;
+      debug_instret_reported <= minstret_WB;
+    end
+  end
+  wire          debug_valid      = valid_WB
+                                 & ~(debug_reported & (minstret_WB == debug_instret_reported));
   wire  [31: 0] debug_wb_addr    = rf_wr_addr_WB;
   wire  [31: 0] debug_wb_data    = rf_wr_data_WB;
   wire          debug_wb_en      = rf_wr_en_WB;
@@ -553,6 +566,7 @@ module cpu_core_pipe
     .o_update_instret   ( update_instret        ),
     .o_en_IF            ( en_IF                 ),
     .o_en_IC            ( en_IC                 ),
+    .o_hold_fetch_addr  ( hold_fetch_addr       ),
     .o_en_ID            ( en_ID                 ),
     .o_en_ID_instr      ( en_ID_instr           ),
     .o_en_RF            ( en_RF                 ),
@@ -603,6 +617,7 @@ module cpu_core_pipe
     .i_refetch      ( 1'b0                  ),
     .i_freeze_pc    ( ~update_pc            ),
     .i_freeze_pc_test( ~update_pc_test      ),
+    .i_hold_fetch_addr( hold_fetch_addr     ),
     .i_compressed   ( 1'b0                  ),
     .i_offset_pc    ( 1'b0                  ),
     .i_sel_pc       ( sel_pc_WB             ),

@@ -98,6 +98,7 @@ module cpu_hazard
   output logic         o_update_pc_test,
   output logic         o_update_instret,
   output logic         o_force_instret,
+  output logic         o_hold_fetch_addr, //! hold the fetch address during a load-use stall
   output logic         o_en_IF,
   output logic         o_en_IC,
   output logic         o_en_ID,
@@ -383,6 +384,8 @@ logic branch_taken_ID;
     & (~hazard_raw_rs2_stall_rf | ~p_stage_RF)
     & (~hazard_raw_rs1_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
     & (~hazard_raw_rs2_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
+    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
+    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
   ;
 
   assign o_update_pc = 1
@@ -397,6 +400,8 @@ logic branch_taken_ID;
     & (~hazard_raw_rs2_stall_rf | ~p_stage_RF)
     & (~hazard_raw_rs1_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
     & (~hazard_raw_rs2_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
+    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
+    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
   ;
 
   assign o_update_pc_test = 1
@@ -411,6 +416,16 @@ logic branch_taken_ID;
     & (~hazard_raw_rs2_stall_ex | ~p_stage_ID)
   ;
 
+  //! a load-use stall freezes the instruction output of the fetch stage; without
+  //! holding the fetch address the word fetched meanwhile is dropped and the
+  //! instruction is skipped altogether (only reachable with RF but no ID stage).
+  //! the load-use stall lasts two cycles here, so the fetch address is held twice:
+  //! once when the hazard is seen in RF and once more two cycles later, when the
+  //! instruction register in ID is still replaying.
+  assign o_hold_fetch_addr = ~p_stage_ID & p_stage_RF & (0
+    | hazard_raw_rs1_stall_rf    | hazard_raw_rs2_stall_rf
+    | hazard_raw_rs1_stall_ex_c2 | hazard_raw_rs2_stall_ex_c2);
+
   assign o_en_IF = 1;
   assign o_en_IC = 1;
   assign o_en_ID = 1
@@ -421,6 +436,8 @@ logic branch_taken_ID;
     & (~hazard_branch_id_c1 | ~p_stage_ID)
     & (~hazard_branch_rf_c1 | ~p_stage_ID)
     & (~hazard_branch_ex_c1)
+    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
+    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
   ;
   assign o_en_ID_instr = 1
     & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID)

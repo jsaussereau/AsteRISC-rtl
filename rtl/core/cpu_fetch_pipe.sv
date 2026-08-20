@@ -60,7 +60,8 @@ module cpu_fetch_pipe
   input  wire          i_update_instret,  //! update instret
   input  wire          i_refetch,         //! 
   input  wire          i_freeze_pc,       //! 
-  input  wire          i_freeze_pc_test,  //! 
+  input  wire          i_freeze_pc_test,
+  input  wire          i_hold_fetch_addr, //! hold the fetch address (data-hazard stall: the word must not be lost)
   input  wire          i_compressed,      //! instruction is compressed
   input  wire          i_offset_pc,       //! force fetching next pc
   input  sel_pc_e      i_sel_pc,          //! program counter select
@@ -193,10 +194,12 @@ module cpu_fetch_pipe
     //if (i_en_fetch) begin
       ibus_wr_en   <= 1'b0;
       ibus_be      <= 4'b0000;
-      if (i_offset_pc) begin
-        fetch_addr  <= (next_pc + 2) & ~p_reset_vector;
-      end else begin
-        fetch_addr  <= next_pc & ~p_reset_vector;
+      if (!i_hold_fetch_addr) begin
+        if (i_offset_pc) begin
+          fetch_addr  <= (next_pc + 2) & ~p_reset_vector;
+        end else begin
+          fetch_addr  <= next_pc & ~p_reset_vector;
+        end
       end
       ibus_wr_data <= 32'd0;
     //end 
