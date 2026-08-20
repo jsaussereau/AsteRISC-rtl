@@ -216,7 +216,7 @@ module cpu_fetch
       end else */if (fetch_alternate && bad_predict) begin
         next_pc = computed_pc_reg;
       end else begin
-        next_pc = predicted_pc_reg;
+        next_pc = predicted_pc;
       end
     end else begin
       next_pc = computed_pc;
