@@ -20,7 +20,79 @@
 *
 */
 
-//! CPU hazard unit
+//! CPU pipeline control unit (hazards, stalls, flushes, redirections)
+//!
+//! ## Slots and groups
+//!
+//! `cpu_core_pipe` is parameterised: `p_stage_<X>` is the **number of pipeline
+//! barriers** of group X, not a boolean. Rather than reasoning about a variable
+//! number of stages, this unit reasons about a fixed number of **slots** -- the
+//! places where an instruction is observed by a functional unit:
+//!
+//! | slot | payload      | functional unit fed by the slot           |
+//! |------|--------------|------------------------------------------|
+//! | IF   | fetch output | instruction decompressor                  |
+//! | IC   | `instr_IC`   | instruction decoder                       |
+//! | ID   | `ctrl_ID`    | register file read port                   |
+//! | RF   | `ctrl_RF`    | execute unit (ALU, branch resolution)     |
+//! | EX   | `ctrl_EX`    | data memory access                        |
+//! | MA   | `ctrl_MA`    | write back mux                            |
+//! | WB   | `ctrl_WB`    | register file write port                  |
+//!
+//! Slots always exist, and a slot is the *output* of its group. What the
+//! parameters change is how many barriers stand between two consecutive slots:
+//! `p_stage_RF = 0` makes the RF slot a combinational alias of the ID slot,
+//! `p_stage_EX = 3` puts three barriers between the RF and EX slots. Every slot
+//! of a group shares the same `en` and `flush`, so a group behaves as a single
+//! elastic element whatever its depth, and every decision below is expressed on
+//! slots -- which is what makes the unit correct for any parameter combination
+//! instead of for the handful that happened to be tuned.
+//!
+//! ## Three mechanisms:
+//!
+//! 1. **Freeze / bubble** (`o_en_*`, `o_flush_*` from a stall). A slot that
+//!    cannot issue freezes itself and everything upstream of it, and a bubble is
+//!    inserted into the barrier immediately downstream. `freeze` is built by
+//!    propagating the per-slot stall conditions upstream, which makes the
+//!    pipeline elastic by construction: no combination of stalls can drop or
+//!    duplicate an instruction.
+//!
+//! 2. **Redirection** (`o_redirect`). Every control transfer -- `jal`, `jalr`
+//!    and conditional branches alike -- is resolved at *one* point, the RF slot,
+//!    where the execute unit produces `branch_taken` and the target. `jal` may
+//!    additionally be resolved earlier, at the IC slot straight out of the
+//!    decoder (`p_early_jal`), because its target needs no register value.
+//!    A redirection is emitted at most once per instruction: the resolving slot
+//!    is visited exactly once -- an instruction leaves a slot only when it is
+//!    not frozen, which is exactly when the redirection fires -- and `jal` is
+//!    skipped at the RF slot when it has already been handled at the IC slot.
+//!
+//! 3. **Shadow kill** (`o_kill_IF`). After a redirection the front-end keeps
+//!    delivering wrong-path instructions until the new target comes out of the
+//!    instruction memory. That delay is a static property of the fetch pipeline
+//!    (`REDIRECT_SHADOW`) counted in fetch *advances*, not in cycles, so a stall
+//!    landing inside the shadow extends it instead of cutting it short. It does
+//!    not depend on `p_stage_IF`: extra fetch barriers buffer the wrong-path
+//!    words but do not make the instruction memory produce more of them.
+//!    Instructions younger than the branch that are already latched are killed
+//!    by flushing every front-end barrier from the resolving slot upstream -- a
+//!    set that needs no parameter-dependent wording, because a barrier that does
+//!    not exist has nothing to flush and ignores the request.
+//!
+//! ## Operand forwarding
+//!
+//! Forwarding is not written per named slot: `cpu_core_pipe` presents a flat,
+//! **youngest-first** list of `N_FWD` in-flight register writes -- one entry per
+//! barrier downstream of the RF slot, whatever the group it belongs to -- and
+//! this unit picks the youngest entry whose destination matches. An entry that
+//! matches but is not `ready` (a load whose data has not come back yet) is the
+//! one read-after-write that forwarding cannot cover, hence the one stall. That
+//! single rule replaces the hand-written EX/MA/WB/pending-write cases and scales
+//! to any group depth for free.
+//!
+//! Side effects (register write, memory write, redirection, retirement) are
+//! gated by the slot `valid` bits in `cpu_core_pipe`, so a killed instruction is
+//! architecturally invisible even before its payload is replaced by a bubble.
 
 `ifndef __CPU_HAZARD__
 `define __CPU_HAZARD__
@@ -35,453 +107,260 @@
 module cpu_hazard
   import pck_control::*;
 #(
-  parameter p_stage_IF = 1,
-  parameter p_stage_IC = 0,
-  parameter p_stage_ID = 1,
-  parameter p_stage_RF = 0,
-  parameter p_stage_EX = 1,
-  parameter p_stage_MA = 1,
-  parameter p_stage_WB = 1
+  parameter p_stage_IF     = 1,           //! number of fetch barriers (>= 1)
+  parameter p_stage_IC     = 0,           //! number of decompression barriers
+  parameter p_stage_ID     = 1,           //! number of decode barriers
+  parameter p_stage_RF     = 0,           //! number of register file barriers (0 or 1)
+  parameter p_stage_EX     = 1,           //! number of execute barriers
+  parameter p_stage_MA     = 1,           //! number of memory access barriers (>= 1)
+  parameter p_stage_WB     = 1,           //! number of write back barriers
+  parameter p_early_jal    = 1,           //! resolve `jal` from the decoder instead of the RF slot
+  parameter p_redirect_buf = 1,           //! register the redirection target before the fetch stage
+  parameter p_n_fwd        = 3            //! number of in-flight register writes presented by the core
 )(
   input  wire          i_clk,             //! global clock
   input  wire          i_rst,             //! global reset
-  input  wire  [ 4: 0] i_rf_rd1_addr,     //! register file read address 1 (rs1) (IF stage)
-  input  wire  [ 4: 0] i_rf_rd2_addr,     //! register file read address 2 (rs2) (IF stage)
-  input  wire          i_rf_rd2_used,     //! register file read port 2 is used  (IF stage)
-  input  wire  [ 4: 0] i_rf_rd1_addr_ID,  //! register file read address 1 (rs1) (ID stage)
-  input  wire  [ 4: 0] i_rf_rd2_addr_ID,  //! register file read address 2 (rs2) (ID stage)
-  input  wire          i_rf_rd2_used_ID,  //! register file read port 2 is used  (ID stage)
-  input  wire  [ 4: 0] i_rf_rd1_addr_RF,  //! register file read address 1 (rs1) (RF stage)
-  input  wire  [ 4: 0] i_rf_rd2_addr_RF,  //! register file read address 2 (rs2) (RF stage)
-  input  wire          i_rf_rd2_used_RF,  //! register file read port 2 is used  (RF stage)
-  input  wire  [ 4: 0] i_rf_rd1_addr_EX,  //! register file read address 1 (rs1) (EX stage)
-  input  wire  [ 4: 0] i_rf_rd2_addr_EX,  //! register file read address 2 (rs2) (EX stage)
-  input  wire          i_rf_rd2_used_EX,  //! register file read port 2 is used  (EX stage)
-  input  wire  [ 4: 0] i_rf_rd1_addr_MA,  //! register file read address 1 (rs1) (MA stage)
-  input  wire  [ 4: 0] i_rf_rd2_addr_MA,  //! register file read address 2 (rs2) (MA stage)
-  input  wire          i_rf_rd2_used_MA,  //! register file read port 2 is used  (MA stage)
-  input  wire  [ 4: 0] i_wb_addr_ID,      //! register file write address (rd) (IF stage)
-  input  wire  [ 4: 0] i_wb_addr_RF,      //! register file write address (rd) (RF stage)
-  input  wire  [ 4: 0] i_wb_addr_EX,      //! register file write address (rd) (EX stage)
-  input  wire  [ 4: 0] i_wb_addr_MA,      //! register file write address (rd) (MA stage)
-  input  wire  [ 4: 0] i_wb_addr_WB,      //! register file write address (rd) (WB stage)
-  input  wire  [31: 0] i_pc,              //! program counter (IF stage)
-  input  sel_br_e      i_sel_br,          //! program counter mux selector
-  input  sel_br_e      i_sel_br_ID,       //! program counter mux selector
-  input  sel_br_e      i_sel_br_RF,       //! program counter mux selector
-  input  sel_br_e      i_sel_br_EX,       //! program counter mux selector
-  input  sel_br_e      i_sel_br_MA,       //! program counter mux selector
-  input  sel_wb_e      i_sel_wb,          //! write back source selector (IF stage)
-  input  sel_wb_e      i_sel_wb_ID,       //! write back source selector (ID stage)
-  input  sel_wb_e      i_sel_wb_RF,       //! write back source selector (RF stage)
-  input  sel_wb_e      i_sel_wb_EX,       //! write back source selector (EX stage)
-  input  sel_wb_e      i_sel_wb_MA,       //! write back source selector (MA stage)
-  input  sel_wb_e      i_sel_wb_WB,       //! write back source selector (WB stage)
-  input  wire          i_branch_taken,
-  input  wire          i_branch_taken_EX,
-  input  wire          i_branch_taken_MA,
-  input  wire          i_valid_IF,        //! the current instruction in stage IF is meant to be executed
-  input  wire          i_valid_IC,        //! the current instruction in stage IC is meant to be executed
-  input  wire          i_valid_ID,        //! the current instruction in stage ID is meant to be executed
-  input  wire          i_valid_RF,        //! the current instruction in stage RF is meant to be executed
-  input  wire          i_valid_EX,        //! the current instruction in stage EX is meant to be executed
-  input  wire          i_valid_MA,        //! the current instruction in stage MA is meant to be executed
-  input  wire          i_valid_WB,        //! the current instruction in stage WB is meant to be executed
-  output logic         o_squash_IF,
-  output logic         o_squash_IC,
-  output logic         o_squash_ID,
-  output logic         o_squash_RF,
-  output logic         o_squash_EX,
-  output logic         o_squash_MA,
-  output logic         o_squash_WB,
-  output logic         o_update_pc,
-  output logic         o_update_pc_test,
-  output logic         o_update_instret,
-  output logic         o_force_instret,
-  output logic         o_hold_fetch_addr, //! hold the fetch address during a load-use stall
-  output logic         o_en_IF,
-  output logic         o_en_IC,
-  output logic         o_en_ID,
-  output logic         o_en_ID_instr,
-  output logic         o_en_RF,
-  output logic         o_en_RF_addr,
-  output logic         o_en_EX,
-  output logic         o_en_MA,
-  output logic         o_en_WB,
-  output logic         o_bp_rs1_rf,       //! bypass rs1 from stage RF
-  output logic         o_bp_rs1_ex,       //! bypass rs1 from stage EX
-  output logic         o_bp_rs1_ma,       //! bypass rs1 from stage MA
-  output logic         o_bp_rs1_wb,       //! bypass rs1 from stage WB
-  output logic         o_bp_rs1_pw,       //! bypass rs1 from stage PW (pending write)
-  output logic         o_bp_rs2_rf,       //! bypass rs2 from stage RF
-  output logic         o_bp_rs2_ex,       //! bypass rs2 from stage EX
-  output logic         o_bp_rs2_ma,       //! bypass rs2 from stage MA
-  output logic         o_bp_rs2_wb,       //! bypass rs2 from stage WB
-  output logic         o_bp_rs2_pw,       //! bypass rs2 from stage PW (pending write)
-  output logic         o_bp_jal,          //! bypass for jal
-  output logic         o_bp_jalr,         //! bypass for jalr
-  output logic         o_bp_branch,       //! bypass for other branches
-  output logic         o_stall_rs1,       //! a stall needed for the instruction in ID stage
-  output logic         o_stall_rs2        //! a stall needed for the instruction in ID stage
+
+  // slot occupancy
+  input  wire          i_valid_IC,        //! the IC slot holds a real instruction
+  input  wire          i_valid_RF,        //! the RF slot holds a real instruction
+
+  // consumer: source registers read by the instruction in the RF slot
+  input  wire  [ 4: 0] i_rd1_addr_RF,     //! rs1 address
+  input  wire  [ 4: 0] i_rd2_addr_RF,     //! rs2 address
+  input  wire          i_rd2_used_RF,     //! rs2 is actually read
+
+  // producers: in-flight register writes, youngest first (one per barrier
+  // downstream of the RF slot). Flattened so that the port list stays portable.
+  input  wire  [p_n_fwd-1  : 0] i_fwd_valid, //! the entry holds a real instruction
+  input  wire  [p_n_fwd-1  : 0] i_fwd_en_wb, //! the entry writes a register
+  input  wire  [p_n_fwd*5-1: 0] i_fwd_addr,  //! destination register of each entry
+  input  wire  [p_n_fwd-1  : 0] i_fwd_ready, //! the entry already holds its result
+
+  // control transfer resolution
+  input  sel_br_e      i_sel_br_IC,       //! branch class decoded from the IC slot
+  input  sel_br_e      i_sel_br_RF,       //! branch class of the RF slot
+  input  wire          i_branch_taken_RF, //! the RF slot takes its branch
+  input  wire          i_exec_done_RF,    //! the execute unit has a result for the RF slot
+
+  // pipeline flow control
+  output logic         o_en_IF,           //! advance the fetch stage
+  output logic         o_en_IC,           //! load the IC barriers
+  output logic         o_en_ID,           //! load the ID barriers
+  output logic         o_en_RF,           //! load the RF barriers
+  output logic         o_en_EX,           //! load the EX barriers
+  output logic         o_en_MA,           //! load the MA barriers
+  output logic         o_en_WB,           //! load the WB barriers
+  output logic         o_kill_IF,         //! the fetch output is wrong-path
+  output logic         o_flush_IF,        //! load a bubble into the extra fetch barriers
+  output logic         o_flush_IC,        //! load a bubble into the IC barriers
+  output logic         o_flush_ID,        //! load a bubble into the ID barriers
+  output logic         o_flush_RF,        //! load a bubble into the RF barriers
+  output logic         o_flush_EX,        //! load a bubble into the EX barriers
+  output logic         o_flush_MA,        //! load a bubble into the MA barriers
+  output logic         o_flush_WB,        //! load a bubble into the WB barriers
+  output logic         o_squash_IC,       //! every IC barrier is younger than a resolved branch
+  output logic         o_squash_ID,       //! every ID barrier is younger than a resolved branch
+
+  // redirection
+  output logic         o_redirect,        //! redirect the fetch stage this cycle
+  output logic         o_redirect_early,  //! the target comes from the decoder (early `jal`)
+
+  // operand forwarding towards the RF slot (one-hot over the entry list)
+  output logic [p_n_fwd-1: 0] o_fwd_rs1,  //! forward rs1 from this entry
+  output logic [p_n_fwd-1: 0] o_fwd_rs2,  //! forward rs2 from this entry
+
+  // debug
+  output logic         o_stall_rs1,       //! rs1 caused a load-use stall
+  output logic         o_stall_rs2        //! rs2 caused a load-use stall
 );
 
-logic rst_p1; 
+  /*******************************************************
+    Static pipeline topology
 
-logic pipoutest;
+    Everything below is derived from the `p_stage_*` parameters; nothing in this
+    unit hard-codes a particular pipeline shape.
+  *******************************************************/
 
-logic hazard_unhandled; 
+  //! Fetch *advances* the front-end still owes after a redirection before its
+  //! output is back on the right path: one for the registered instruction
+  //! memory read, one more if the target itself is registered.
+  //!
+  //! Counting advances rather than cycles is what makes this correct when a
+  //! stall lands inside the shadow: a frozen fetch stage repeats its output, so
+  //! a wrong-path word repeats with it and the shadow has to wait too.
+  localparam int  REDIRECT_SHADOW = 1 + p_redirect_buf;
+  localparam int  SHADOW_W        = (REDIRECT_SHADOW < 2) ? 1 : 2;
 
-logic hazard_jal_if_c1; // 1st cycle
-logic hazard_jal_if_fixed_c1;
-logic hazard_jal_id_c1; // 1st cycle
-logic hazard_jal_id_fixed_c1;
-logic hazard_jal_id_c2; // 2nd cycle (the fetch stage registers the input address, adding a one-cycle latency) 
-logic hazard_jal_id_c3; // 3nd cycle (the fetch stage registers the input address, adding a one-cycle latency) 
+  /*******************************************************
+    Read after write
 
-logic hazard_jalr_if_c1;
-logic hazard_jalr_if_fixed_c1;
-logic hazard_jalr_id_c1;
-logic hazard_jalr_id_fixed_c1;
-logic hazard_jalr_rf_c1;
-logic hazard_jalr_rf_fixed_c1;
-logic hazard_jalr_ex_c1; // 1st cycle
-logic hazard_jalr_ex_c2; // 2nd cycle (the fetch stage registers the input address, adding a one-cycle latency)
+    A producer is an in-flight entry that owns a not-yet-committed write to a
+    register the RF slot reads. `x0` is never a real destination and an invalid
+    entry never produces anything. The entries are ordered youngest first, so
+    the correct value is always the one of *lowest* index -- an older write to
+    the same register has already been superseded.
+  *******************************************************/
 
-logic branch_if;
+  wire          read_rs1 = i_valid_RF & (i_rd1_addr_RF != 5'd0);
+  wire          read_rs2 = i_valid_RF & (i_rd2_addr_RF != 5'd0) & i_rd2_used_RF;
 
-logic hazard_branch;
-logic hazard_branch_id_c1; // 1st cycle
-logic hazard_branch_id_c2; // 2nd cycle
-logic hazard_branch_rf_c1; // 1st cycle
-logic hazard_branch_rf_c2; // 2nd cycle
-logic hazard_branch_ex_c1; // 1st cycle
-logic hazard_branch_ex_c2; // 2nd cycle (the fetch stage registers the input address, adding a one-cycle latency)
-logic hazard_branch_ex_c3; // 3rd cycle (the fetch stage registers the input address, adding a one-cycle latency)
+  logic [p_n_fwd-1: 0] match_rs1;         //! entries whose destination is rs1
+  logic [p_n_fwd-1: 0] match_rs2;         //! entries whose destination is rs2
 
-logic hazard_raw;
-logic hazard_raw_rs1_id;
-logic hazard_raw_rs1_rf;
-logic hazard_raw_rs1_ex;
-logic hazard_raw_rs1_ma;
-logic hazard_raw_rs1_wb;
-logic hazard_raw_rs1_pw;
-logic hazard_raw_rs2_id;
-logic hazard_raw_rs2_rf;
-logic hazard_raw_rs2_ex;
-logic hazard_raw_rs2_ma;
-logic hazard_raw_rs2_wb;
-logic hazard_raw_rs2_pw;
-
-logic wb_from_dmem_id; // write back source for instruction in ID stage is DMEM
-logic wb_from_dmem_rf; // write back source for instruction in RF stage is DMEM
-logic wb_from_dmem_ex; // write back source for instruction in EX stage is DMEM
-
-logic hazard_raw_rs1_stall_id; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs2_stall_id; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs1_stall_rf; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs2_stall_rf; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs1_stall_ex; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs2_stall_ex; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs1_stall_rf_c2; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs2_stall_rf_c2; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs1_stall_ex_c2; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs2_stall_ex_c2; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs1_stall_ex_c3; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs2_stall_ex_c3; // raw with bypass from memory output -> stall needed
-logic hazard_raw_rs1_stall_id_c2;
-logic hazard_raw_rs2_stall_id_c2;
-logic hazard_raw_rs1_stall_id_c3;
-logic hazard_raw_rs2_stall_id_c3;
-
-logic squash_IF;
-logic squash_IC;
-logic squash_ID;
-logic squash_RF;
-logic squash_EX;
-logic squash_MA;
-logic squash_WB;
-
-logic [ 4: 0] wb_addr_PW;      //! register file write address (rd) (pending write back)
-sel_wb_e      sel_wb_PW;       //! write back source selector (pending write back)
-
-logic branch_taken_ID;
-
-  assign branch_taken_ID = i_branch_taken & ~hazard_branch_ex_c1 & ~squash_EX;
-  assign wb_from_dmem_id = (i_sel_wb_ID == wb_dmem) ? 1'b1 : 1'b0;
-  assign wb_from_dmem_rf = (i_sel_wb_RF == wb_dmem) ? 1'b1 : 1'b0;
-  assign wb_from_dmem_ex = (i_sel_wb_EX == wb_dmem) ? 1'b1 : 1'b0;
-
-  // JAL 
-  assign hazard_jal_if_c1 = i_sel_br    == br_jal;
-  assign hazard_jal_if_fixed_c1 = hazard_jal_if_c1 
-    // make sure the jal instruction must be executed
-    & ~hazard_branch_id_c1 
-    & (~hazard_branch_id_c2 | p_stage_RF)
-    & (~hazard_branch_ex_c1 | ~p_stage_RF)
-    & (~hazard_branch_ex_c2 | ~p_stage_RF)
-    & (~hazard_branch_ex_c2 | p_stage_ID)
-  ;
-  assign hazard_jal_id_c1 = i_sel_br_ID == br_jal;
-  assign hazard_jal_id_fixed_c1 = hazard_jal_id_c1
-    & (~hazard_branch_ex_c2 | p_stage_ID)
-  ;
-
-  // JALR
-  assign hazard_jalr_if_c1 = i_sel_br    == br_jalr;
-  assign hazard_jalr_if_fixed_c1 = hazard_jalr_if_c1 
-    // make sure the jalr instruction must be executed
-    & ~hazard_branch_id_c1 
-    & ~hazard_branch_rf_c1 
-    //& (~hazard_branch_id_c2 | p_stage_RF)
-    & (~hazard_branch_ex_c1 )
-    & (~hazard_branch_ex_c2 )
-  ;
-  assign hazard_jalr_id_c1 = i_sel_br_ID == br_jalr;
-  assign hazard_jalr_id_fixed_c1 = hazard_jalr_id_c1
-    & (~hazard_branch_rf_c1 | ~p_stage_RF)
-    & (~hazard_branch_ex_c1 | ~p_stage_RF)
-    & (~hazard_branch_ex_c2 | p_stage_ID)
-  ;
-  assign hazard_jalr_rf_c1 = i_sel_br_RF == br_jalr;
-  assign hazard_jalr_rf_fixed_c1 = hazard_jalr_rf_c1
-    & (~hazard_branch_ex_c1 | ~p_stage_RF)
-    & (~hazard_branch_ex_c2 | p_stage_ID)
-  ;
-  assign hazard_jalr_ex_c1 = i_sel_br_EX == br_jalr;
-
-  // Other branches 
-  assign hazard_branch_id_c1 = branch_taken_ID   && i_sel_br_ID != br_none && i_sel_br_ID != br_jal && i_sel_br_ID != br_jalr;
-  assign hazard_branch_rf_c1 = branch_taken_ID   && i_sel_br_RF != br_none && i_sel_br_RF != br_jal && i_sel_br_RF != br_jalr;
-  assign hazard_branch_ex_c1 = i_branch_taken_EX && i_sel_br_EX != br_none && i_sel_br_EX != br_jal && i_sel_br_EX != br_jalr;
-  assign hazard_branch_ma_c1 = i_branch_taken_MA && i_sel_br_MA != br_none && i_sel_br_MA != br_jal && i_sel_br_MA != br_jalr;
-  assign hazard_branch       = hazard_branch_id_c1 | (hazard_branch_rf_c1 | hazard_branch_ex_c1) & p_stage_ID;
-
-  // Read after write
-  assign hazard_raw_rs1_id  = (i_rf_rd1_addr    == i_wb_addr_ID && i_sel_wb_ID != wb_none && i_rf_rd1_addr    != 5'd0);
-  assign hazard_raw_rs1_rf  = (i_rf_rd1_addr_ID == i_wb_addr_RF && i_sel_wb_RF != wb_none && i_rf_rd1_addr_ID != 5'd0);
-  assign hazard_raw_rs1_ex  = (i_rf_rd1_addr_RF == i_wb_addr_EX && i_sel_wb_EX != wb_none && i_rf_rd1_addr_RF != 5'd0);
-  assign hazard_raw_rs1_ma  = (i_rf_rd1_addr_RF == i_wb_addr_MA && i_sel_wb_MA != wb_none && i_rf_rd1_addr_RF != 5'd0);
-  assign hazard_raw_rs1_wb  = (i_rf_rd1_addr_RF == i_wb_addr_WB && i_sel_wb_WB != wb_none && i_rf_rd1_addr_RF != 5'd0);
-  assign hazard_raw_rs1_pw  = (i_rf_rd1_addr_RF ==   wb_addr_PW &&   sel_wb_PW != wb_none && i_rf_rd1_addr_RF != 5'd0);
-
-  assign hazard_raw_rs1_stall_id = (hazard_raw_rs1_id && wb_from_dmem_id && ~hazard_branch_rf_c1 && ~hazard_branch_ex_c1);
-  assign hazard_raw_rs1_stall_rf = (hazard_raw_rs1_rf && wb_from_dmem_rf);
-  assign hazard_raw_rs1_stall_ex = (hazard_raw_rs1_ex && wb_from_dmem_ex);
-
-  assign hazard_raw_rs2_id  = (i_rf_rd2_addr    == i_wb_addr_ID && i_sel_wb_ID != wb_none && i_rf_rd2_addr    != 5'd0 && i_rf_rd2_used);
-  assign hazard_raw_rs2_rf  = (i_rf_rd2_addr_ID == i_wb_addr_RF && i_sel_wb_RF != wb_none && i_rf_rd2_addr_ID != 5'd0 && i_rf_rd2_used_ID);
-  assign hazard_raw_rs2_ex  = (i_rf_rd2_addr_RF == i_wb_addr_EX && i_sel_wb_EX != wb_none && i_rf_rd2_addr_RF != 5'd0 && i_rf_rd2_used_RF);
-  assign hazard_raw_rs2_ma  = (i_rf_rd2_addr_RF == i_wb_addr_MA && i_sel_wb_MA != wb_none && i_rf_rd2_addr_RF != 5'd0 && i_rf_rd2_used_RF);
-  assign hazard_raw_rs2_wb  = (i_rf_rd2_addr_RF == i_wb_addr_WB && i_sel_wb_WB != wb_none && i_rf_rd2_addr_RF != 5'd0 && i_rf_rd2_used_RF);
-  assign hazard_raw_rs2_pw  = (i_rf_rd2_addr_RF ==   wb_addr_PW &&   sel_wb_PW != wb_none && i_rf_rd2_addr_RF != 5'd0 && i_rf_rd2_used_RF);
-  
-  assign hazard_raw_rs2_stall_id = (hazard_raw_rs2_id && wb_from_dmem_id);
-  assign hazard_raw_rs2_stall_rf = (hazard_raw_rs2_rf && wb_from_dmem_rf);
-  assign hazard_raw_rs2_stall_ex = (hazard_raw_rs2_ex && wb_from_dmem_ex);
-
-  assign hazard_raw         = hazard_raw_rs1_rf | hazard_raw_rs1_ex | hazard_raw_rs1_ma | hazard_raw_rs1_wb | hazard_raw_rs2_rf | hazard_raw_rs2_ex | hazard_raw_rs2_ma | hazard_raw_rs2_wb;
-
-  assign hazard_unhandled   = 0;
-
-  assign pipoutest = hazard_branch_id_c1 & (hazard_raw_rs1_stall_ex_c2 | hazard_raw_rs2_stall_ex_c2);
-  //assign poupitest = hazard_branch_id_c1 & (hazard_raw_rs1_stall_rf_c3 | hazard_raw_rs2_stall_rf_c3);
-
-  // reset register
-  always_ff @(posedge i_clk) begin
-    rst_p1               <= i_rst;
-  end
-  
-  // pending write (RAM regfile)
-  always_ff @(posedge i_clk) begin
-    wb_addr_PW <= i_wb_addr_WB;
-    sel_wb_PW  <= i_sel_wb_WB;
-  end
-
-  // add a cycle if the fetch stage registers the input address
-  always_ff @(posedge i_clk) begin
-    if (i_rst) begin
-      hazard_jal_id_c2           <= 0;
-      hazard_jal_id_c3           <= 0;
-      hazard_jalr_ex_c2          <= 0;
-      hazard_branch_id_c2        <= 0;
-      hazard_branch_rf_c2        <= 0;
-      hazard_branch_ex_c2        <= 0;
-      hazard_branch_ex_c3        <= 0;
-      hazard_raw_rs1_stall_id_c2 <= 0;
-      hazard_raw_rs2_stall_id_c2 <= 0;
-      hazard_raw_rs1_stall_id_c3 <= 0;
-      hazard_raw_rs2_stall_id_c3 <= 0;
-      hazard_raw_rs1_stall_rf_c2 <= 0;
-      hazard_raw_rs2_stall_rf_c2 <= 0;
-      hazard_raw_rs1_stall_ex_c2 <= 0;
-      hazard_raw_rs2_stall_ex_c2 <= 0;
-      hazard_raw_rs1_stall_ex_c3 <= 0;
-      hazard_raw_rs2_stall_ex_c3 <= 0;
-    end else begin
-      hazard_jal_id_c2           <= hazard_jal_id_fixed_c1;
-      hazard_jal_id_c3           <= hazard_jal_id_c2;
-      hazard_jalr_ex_c2          <= hazard_jalr_ex_c1;
-      hazard_branch_id_c2        <= hazard_branch_id_c1;
-      hazard_branch_rf_c2        <= hazard_branch_rf_c1;
-      hazard_branch_ex_c2        <= hazard_branch_ex_c1;
-      hazard_branch_ex_c3        <= hazard_branch_ex_c2;
-      hazard_raw_rs1_stall_id_c2 <= hazard_raw_rs1_stall_id;
-      hazard_raw_rs2_stall_id_c2 <= hazard_raw_rs2_stall_id;
-      hazard_raw_rs1_stall_id_c3 <= hazard_raw_rs1_stall_id_c2;
-      hazard_raw_rs2_stall_id_c3 <= hazard_raw_rs2_stall_id_c2;
-      hazard_raw_rs1_stall_rf_c2 <= hazard_raw_rs1_stall_rf;
-      hazard_raw_rs2_stall_rf_c2 <= hazard_raw_rs2_stall_rf;
-      hazard_raw_rs1_stall_ex_c2 <= hazard_raw_rs1_stall_ex;
-      hazard_raw_rs2_stall_ex_c2 <= hazard_raw_rs2_stall_ex;
-      hazard_raw_rs1_stall_ex_c3 <= hazard_raw_rs1_stall_ex_c2;
-      hazard_raw_rs2_stall_ex_c3 <= hazard_raw_rs2_stall_ex_c2;
+  always_comb begin: raw_detection
+    for (int unsigned i = 0; i < p_n_fwd; i++) begin
+      automatic logic [4:0] a = i_fwd_addr[i*5 +: 5];
+      automatic logic       w = i_fwd_valid[i] & i_fwd_en_wb[i] & (a != 5'd0);
+      match_rs1[i] = w & read_rs1 & (a == i_rd1_addr_RF);
+      match_rs2[i] = w & read_rs2 & (a == i_rd2_addr_RF);
     end
   end
-  //TODO: make these registers togglable
 
-  assign squash_IF = 0
-    | (p_stage_ID & hazard_jal_id_c1) 
-    | hazard_jal_id_c2 
-    | (~p_stage_ID & hazard_jal_id_c3) 
-    | (p_stage_ID & hazard_jalr_id_fixed_c1) 
-    | (p_stage_ID & hazard_jalr_rf_fixed_c1) 
-    | hazard_jalr_ex_c1 
-    | hazard_jalr_ex_c2
-  ;
-  assign squash_IC = 0;
-  assign squash_ID = p_stage_ID & (hazard_branch_ex_c1 | hazard_branch_ex_c2);
-  assign squash_RF = p_stage_RF & (hazard_branch_ex_c1 | hazard_branch_ex_c2);
-  assign squash_EX = 0
-    | hazard_branch_ex_c1
-    | hazard_branch_ex_c2 & ~p_stage_ID
-    | ((hazard_raw_rs1_stall_ex | hazard_raw_rs2_stall_ex) )
-    | ((hazard_raw_rs1_stall_ex_c2 | hazard_raw_rs2_stall_ex_c2) & p_stage_RF)
-  ; 
-  assign squash_MA = 0;
-  assign squash_WB = 0;
+  //! youngest match wins: keep the match of lowest index, drop every older one
+  logic [p_n_fwd-1: 0] sel_rs1;
+  logic [p_n_fwd-1: 0] sel_rs2;
 
-  assign o_squash_IF = squash_IF;
-  assign o_squash_IC = squash_IC;
-  assign o_squash_ID = squash_ID;
-  assign o_squash_RF = squash_RF;
-  assign o_squash_EX = squash_EX;
-  assign o_squash_MA = squash_MA;
-  assign o_squash_WB = squash_WB;
+  always_comb begin: raw_priority
+    automatic logic taken1 = 1'b0;
+    automatic logic taken2 = 1'b0;
+    sel_rs1 = '0;
+    sel_rs2 = '0;
+    for (int unsigned i = 0; i < p_n_fwd; i++) begin
+      sel_rs1[i] = match_rs1[i] & ~taken1;
+      sel_rs2[i] = match_rs2[i] & ~taken2;
+      taken1     = taken1 | match_rs1[i];
+      taken2     = taken2 | match_rs2[i];
+    end
+  end
 
-  assign o_update_instret = 1
-    & ~rst_p1
-    & ~hazard_jal_if_fixed_c1
-    & ~hazard_jal_id_fixed_c1
-    & (~hazard_jal_id_c2 | p_stage_ID)
-    & ~hazard_jalr_if_fixed_c1
-    & ~hazard_jalr_id_fixed_c1 
-    & ~hazard_jalr_rf_fixed_c1 
-    & ~hazard_jalr_ex_c1
-    & (~hazard_branch_id_c1 | p_stage_EX)
-    & ~hazard_raw_rs1_stall_id
-    & ~hazard_raw_rs2_stall_id
-    & (~hazard_raw_rs1_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs1_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
-    & (~hazard_raw_rs2_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
-    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
-  ;
+  //! the selected entry can be forwarded when it already holds its result. A
+  //! load still in flight cannot: the data memory is read from the EX slot and
+  //! its result only exists at the MA slot, which is the one read-after-write
+  //! forwarding cannot cover, hence the one stall.
+  assign o_fwd_rs1 = sel_rs1 &  i_fwd_ready;
+  assign o_fwd_rs2 = sel_rs2 &  i_fwd_ready;
 
-  assign o_update_pc = 1
-    & ~hazard_jal_if_fixed_c1
-    & ~hazard_jalr_if_fixed_c1
-    & ~hazard_jalr_id_fixed_c1 
-    & ~hazard_jalr_rf_fixed_c1 
-    & (~hazard_branch_id_c1 | p_stage_EX)
-    & ~hazard_raw_rs1_stall_id
-    & ~hazard_raw_rs2_stall_id
-    & (~hazard_raw_rs1_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs1_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
-    & (~hazard_raw_rs2_stall_ex | hazard_raw_rs1_stall_rf_c2 | p_stage_ID)
-    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
-  ;
+  wire          stall_rs1 = |(sel_rs1 & ~i_fwd_ready);
+  wire          stall_rs2 = |(sel_rs2 & ~i_fwd_ready);
 
-  assign o_update_pc_test = 1
-    & ~hazard_jal_id_fixed_c1
-    & ~hazard_jalr_id_fixed_c1
-    & ~hazard_jalr_rf_fixed_c1
-    & ~hazard_jalr_ex_c1 
-    & ~hazard_branch_ex_c1
-    & (~hazard_raw_rs1_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs1_stall_ex | ~p_stage_ID)
-    & (~hazard_raw_rs2_stall_ex | ~p_stage_ID)
-  ;
+  assign o_stall_rs1 = stall_rs1;
+  assign o_stall_rs2 = stall_rs2;
 
-  //! a load-use stall freezes the instruction output of the fetch stage; without
-  //! holding the fetch address the word fetched meanwhile is dropped and the
-  //! instruction is skipped altogether (only reachable with RF but no ID stage).
-  //! the load-use stall lasts two cycles here, so the fetch address is held twice:
-  //! once when the hazard is seen in RF and once more two cycles later, when the
-  //! instruction register in ID is still replaying.
-  assign o_hold_fetch_addr = ~p_stage_ID & p_stage_RF & (0
-    | hazard_raw_rs1_stall_rf    | hazard_raw_rs2_stall_rf
-    | hazard_raw_rs1_stall_ex_c2 | hazard_raw_rs2_stall_ex_c2);
+  /*******************************************************
+    Freeze and bubble
 
-  assign o_en_IF = 1;
-  assign o_en_IC = 1;
-  assign o_en_ID = 1
-    & (~hazard_raw_rs1_stall_rf | ~p_stage_RF) 
-    & (~hazard_raw_rs2_stall_rf | ~p_stage_RF) 
-    & (~hazard_raw_rs1_stall_ex)
-    & (~hazard_raw_rs2_stall_ex)
-    & (~hazard_branch_id_c1 | ~p_stage_ID)
-    & (~hazard_branch_rf_c1 | ~p_stage_ID)
-    & (~hazard_branch_ex_c1)
-    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID | ~p_stage_RF)
-  ;
-  assign o_en_ID_instr = 1
-    & (~hazard_raw_rs1_stall_ex_c2 | p_stage_ID)
-    & (~hazard_raw_rs2_stall_ex_c2 | p_stage_ID)
-    & (~hazard_raw_rs1_stall_ex_c3 | p_stage_ID)
-    & (~hazard_raw_rs2_stall_ex_c3 | p_stage_ID)
-    & (~hazard_raw_rs1_stall_id_c3 | p_stage_ID)
-    & (~hazard_raw_rs2_stall_id_c3 | p_stage_ID)
-  ;
-  assign o_en_RF_addr = 1
-    & (~hazard_raw_rs1_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_rf | ~p_stage_RF)
-    & (~hazard_raw_rs1_stall_ex | ~p_stage_RF)
-    & (~hazard_raw_rs2_stall_ex | ~p_stage_RF)
-  ;
-  assign o_en_RF = 1
-    & ~hazard_raw_rs1_stall_ex 
-    & ~hazard_raw_rs2_stall_ex 
-    & ~hazard_raw_rs1_stall_ex_c2 
-    & ~hazard_raw_rs2_stall_ex_c2 
-  ;
-  assign o_en_EX = 1;
-  assign o_en_MA = 1;
-  assign o_en_WB = 1;
+    `freeze_<slot>` is asserted when the instruction in that slot cannot move on
+    this cycle. A slot that cannot move also blocks every slot upstream of it,
+    which is the whole of the propagation below. Wherever a frozen slot feeds a
+    slot that does move, a bubble is inserted so that the downstream instruction
+    is not executed twice.
+  *******************************************************/
 
-  assign o_bp_jal = hazard_jal_if_fixed_c1;
-  assign o_bp_jalr = hazard_jalr_rf_fixed_c1;
-  assign o_bp_branch = hazard_branch_rf_c1;
+  //! the RF slot is the only slot with a local stall condition today: a
+  //! load-use hazard, or a multi-cycle execute unit that has not finished
+  wire          stall_RF  = stall_rs1 | stall_rs2 | (i_valid_RF & ~i_exec_done_RF);
 
-  assign o_force_instret = hazard_branch_ex_c2;
-  
-  assign o_bp_rs1_rf = hazard_raw_rs1_rf;
-  assign o_bp_rs1_ex = hazard_raw_rs1_ex & ~wb_from_dmem_ex;
-  assign o_bp_rs1_ma = hazard_raw_rs1_ma;
-  assign o_bp_rs1_wb = hazard_raw_rs1_wb;
-  assign o_bp_rs1_pw = hazard_raw_rs1_pw;
-  assign o_bp_rs2_rf = hazard_raw_rs2_rf;
-  assign o_bp_rs2_ex = hazard_raw_rs2_ex & ~wb_from_dmem_ex;
-  assign o_bp_rs2_ma = hazard_raw_rs2_ma;
-  assign o_bp_rs2_wb = hazard_raw_rs2_wb;
-  assign o_bp_rs2_pw = hazard_raw_rs2_pw;
+  wire          freeze_WB = 1'b0;
+  wire          freeze_MA = freeze_WB;
+  wire          freeze_EX = freeze_MA;
+  wire          freeze_RF = freeze_EX | stall_RF;
+  wire          freeze_ID = freeze_RF;
+  wire          freeze_IC = freeze_ID;
+  wire          freeze_IF = freeze_IC;
 
-  assign o_stall_rs1 = hazard_raw_rs1_stall_id | hazard_raw_rs1_stall_rf;
-  assign o_stall_rs2 = hazard_raw_rs2_stall_id | hazard_raw_rs2_stall_rf;
+  /*******************************************************
+    Redirection
+  *******************************************************/
+
+  logic [SHADOW_W-1: 0] shadow_q;         //! remaining wrong-path fetch outputs
+
+  wire          in_shadow = |shadow_q;
+
+  //! `jal` needs no register value: its target is `pc + imm`, both available
+  //! straight out of the decoder. Resolving it there removes one bubble per
+  //! taken jump for each front-end barrier.
+  wire          redirect_IC = (p_early_jal != 0)
+                            & i_valid_IC
+                            & ~freeze_IC
+                            & (i_sel_br_IC == br_jal);
+
+  //! every other control transfer resolves where the execute unit produces its
+  //! verdict. `jal` is skipped here when it was already handled above.
+  wire          redirect_RF = i_valid_RF
+                            & ~freeze_RF
+                            & i_branch_taken_RF
+                            & ~((p_early_jal != 0) & (i_sel_br_RF == br_jal));
+
+  //! an older instruction always wins: the RF slot is downstream of the IC slot
+  assign o_redirect       = redirect_RF | redirect_IC;
+  assign o_redirect_early = redirect_IC & ~redirect_RF;
+
+  always_ff @(posedge i_clk) begin: redirect_shadow
+    if (i_rst) begin
+      // no shadow out of reset: the fetch stage reports its own output as
+      // invalid until it holds a real instruction word
+      shadow_q <= '0;
+    end else if (o_redirect) begin
+      shadow_q <= REDIRECT_SHADOW[SHADOW_W-1:0];
+    end else if (in_shadow & ~freeze_IF) begin
+      shadow_q <= shadow_q - 1'b1;
+    end
+  end
+
+  /*******************************************************
+    Outputs
+  *******************************************************/
+
+  assign o_en_IF = ~freeze_IF;
+  assign o_en_IC = ~freeze_IC;
+  assign o_en_ID = ~freeze_ID;
+  assign o_en_RF = ~freeze_RF;
+  assign o_en_EX = ~freeze_EX;
+  assign o_en_MA = ~freeze_MA;
+  assign o_en_WB = ~freeze_WB;
+
+  //! the fetch output is wrong-path until the redirection target comes out of
+  //! the instruction memory
+  assign o_kill_IF = in_shadow;
+
+  //! A barrier receives a bubble when the slot feeding it is frozen while it
+  //! moves on -- otherwise the instruction it holds would be executed twice --
+  //! or when the payload it is about to latch is younger than a control
+  //! transfer that just resolved. The latter is every front-end barrier from
+  //! the resolving slot upstream: barriers that do not exist simply ignore the
+  //! request, which is exactly right since nothing is latched there.
+  //!
+  //! The two reasons do *not* reach the same barriers when a group is deeper
+  //! than one, which is the whole difficulty of a deep group:
+  //!
+  //!  - a bubble is inserted at the *head* of the group only. The instructions
+  //!    already inside it are older than the stall and must keep shifting;
+  //!    replacing them by bubbles would simply lose them.
+  //!  - a squash kills *every* barrier of the group. They are all younger than
+  //!    the instruction that resolved the control transfer -- which has already
+  //!    been captured by the group downstream -- so they all have to die.
+  //!
+  //! `o_flush_<X>` is the head request (both reasons), `o_squash_<X>` the one
+  //! the deeper barriers obey. With a single barrier the two coincide, which is
+  //! why this distinction was invisible until now.
+  assign o_squash_IC = redirect_RF | redirect_IC;
+  assign o_squash_ID = redirect_RF;
+
+  assign o_flush_IF = redirect_RF | redirect_IC;
+  assign o_flush_IC = (freeze_IF & ~freeze_IC) | o_squash_IC;
+  assign o_flush_ID = (freeze_IC & ~freeze_ID) | o_squash_ID;
+  assign o_flush_RF = (freeze_ID & ~freeze_RF) | redirect_RF;
+  //! When a group is empty, its slot is a combinational alias of the slot
+  //! upstream: the flush request it receives goes nowhere, and the freeze it
+  //! would have reported never happens. The next barrier downstream must
+  //! therefore look past it, at the freeze of the closest slot that really is
+  //! barriered, or it would latch the same payload every stalled cycle.
+  wire          freeze_ex_eff = (p_stage_EX != 0) ? freeze_EX : freeze_RF;
+
+  assign o_flush_EX = (freeze_RF     & ~freeze_EX);
+  assign o_flush_MA = (freeze_ex_eff & ~freeze_MA);
+  assign o_flush_WB = (freeze_MA     & ~freeze_WB);
 
 endmodule
 

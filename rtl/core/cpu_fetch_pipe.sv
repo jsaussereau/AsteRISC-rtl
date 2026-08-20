@@ -20,6 +20,31 @@
 *
 */
 
+//! CPU instruction fetch stage (pipeline version)
+//!
+//! The fetch unit is a two-deep pipeline:
+//!
+//!   `fetch_addr_q` -> instruction memory (registered read) -> output
+//!
+//! so the instruction word presented on `o_instr` during cycle `c` is the one
+//! addressed by `fetch_addr_q` during cycle `c-1`. `pc_q` shadows that address
+//! so that `o_pc` always describes `o_instr`.
+//!
+//! Flow control is a single enable, `i_en`:
+//!
+//!  * `i_en = 0` freezes `fetch_addr_q`, `pc_q` **and** the memory read enable.
+//!    The RAM holds its output when `i_rd_en` is low, so the output word simply
+//!    repeats and no fetched word is ever dropped -- no skid register needed.
+//!  * `i_en = 1` advances by four bytes, or to `i_redirect_pc` when
+//!    `i_redirect` is set.
+//!
+//! `i_redirect` is only sampled while the unit advances; the control unit
+//! guarantees a redirect is never requested during a freeze (see `cpu_hazard`).
+//!
+//! Everything else -- squashing wrong-path instructions, counting retired
+//! instructions -- belongs to the control unit and to the write back stage, not
+//! here.
+
 `ifndef __CPU_FETCH_PIPE__
 `define __CPU_FETCH_PIPE__
 
@@ -31,208 +56,71 @@
  `include "core/packages/pck_isa.sv"
 `endif
 
-//FIXME: handle instruction cut between two addresses
-
 module cpu_fetch_pipe 
   import pck_control::*;
   import pck_isa::*;
 #(
-  parameter p_reset_vector = 32'hf0000000,
-  parameter p_branch_buf   = 0            //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
+  parameter p_reset_vector = 32'hf0000000
 )(
   input  wire          i_clk,             //! global clock
   input  wire          i_rst,             //! global reset
   input  wire          i_sleep,           //! active high sleep control
 
-  // memory port
-  output logic [31: 0] ibus_addr,         //! data bus address
-  output logic [ 3: 0] ibus_be,           //! data bus write byte enable
-  output logic         ibus_wr_en,        //! data bus write enable
-  output logic [31: 0] ibus_wr_data,      //! data bus write data
-  output logic         ibus_rd_en,        //! data bus read enable
-  input  logic [31: 0] ibus_rd_data,      //! data bus read data
-  input  logic         ibus_busy,         //! data bus busy
-  input  logic         ibus_ack,          //! data bus transfer acknowledge
+  // instruction memory port
+  output logic [31: 0] ibus_addr,         //! instruction bus address
+  output logic [ 3: 0] ibus_be,           //! instruction bus write byte enable
+  output logic         ibus_wr_en,        //! instruction bus write enable
+  output logic [31: 0] ibus_wr_data,      //! instruction bus write data
+  output logic         ibus_rd_en,        //! instruction bus read enable
+  input  logic [31: 0] ibus_rd_data,      //! instruction bus read data
+  input  logic         ibus_busy,         //! instruction bus busy
+  input  logic         ibus_ack,          //! instruction bus transfer acknowledge
 
-  // control signals
-  input  wire          i_en_fetch,        //! fetch enable
-  input  wire          i_update_pc,       //! update program counter
-  input  wire          i_update_instret,  //! update instret
-  input  wire          i_refetch,         //! 
-  input  wire          i_freeze_pc,       //! 
-  input  wire          i_freeze_pc_test,
-  input  wire          i_hold_fetch_addr, //! hold the fetch address (data-hazard stall: the word must not be lost)
-  input  wire          i_compressed,      //! instruction is compressed
-  input  wire          i_offset_pc,       //! force fetching next pc
-  input  sel_pc_e      i_sel_pc,          //! program counter select
-  input  wire  [31: 0] i_alu_out,         //! ALU output
-  input  wire  [31: 0] i_imm,             //! immediate value
-  input  wire  [31: 0] i_rf_rd1_data,     //! regfile data read on port 1
-  input  wire  [31: 0] i_jump_pc,         //! program counter (used for sel_pc == pc_imm)
-  input  wire          i_force_instret,   //! force instret value to i_instret
-  input  wire  [63: 0] i_minstret,        //! instret value to be forced
-  /*
-  input  wire          i_bp_pc_en,        //! enable pc bypass
-  input  wire  [31: 0] i_bp_pc_addr,      //! pc bypass address
-  */
-  output logic [31: 0] o_pc,              //! program counter
-  output logic [31: 0] o_pc_inc,          //! program counter +4 / +2
+  // flow control
+  input  wire          i_en,              //! advance the fetch pipeline
+  input  wire          i_redirect,        //! jump to `i_redirect_pc`
+  input  wire  [31: 0] i_redirect_pc,     //! redirection target
 
-  // fectched instruction 
-  output isa_instr_t   o_instr,           //! instruction to 'decode' stage
-  output logic         o_bypass_decomp,   //! bypass decompressor
-  output logic         o_half_pc_addr,    //! high when the pc is not a multiple of 4
-  output logic         o_half_npc_addr,   //! high when the next pc is not a multiple of 4
-  output logic [63: 0] o_minstret       
+  // fetched instruction
+  output logic [31: 0] o_pc,              //! program counter of `o_instr`
+  output logic [31: 0] o_pc_inc,          //! `o_pc` + 4
+  output isa_instr_t   o_instr,           //! instruction word
+  output logic         o_valid            //! `o_instr` holds a fetched word
 );
 
-  logic         half_pc_addr;
-  logic         half_npc_addr;
+  logic [31: 0] fetch_addr_q;             //! address presented to the memory
+  logic [31: 0] pc_q;                     //! address of the word on the output
+  logic         valid_q;                  //! a word has been fetched at least once
 
-  wire  [31: 0] alu_out;                  //! ALU output
-  logic [31: 0] alu_out_sync;             //! ALU output
+  //! the fetch pipeline only moves when it is enabled and the core is awake
+  wire          advance = i_en & ~i_sleep;
 
-  logic [31: 0] fetch_addr;               //! fetch address
-  logic [31: 0] pc;                       //! program counter
-  logic [31: 0] pc_old;                   //! 
-  logic [31: 0] pc_inc;                   //! program counter +4 / +2
-  logic [31: 0] next_pc;                  //! next program counter value
-  logic [31: 0] next_pc_tmp;
+  wire  [31: 0] next_addr = i_redirect ? i_redirect_pc : (fetch_addr_q + 32'd4);
 
-  logic         debug_flag;
-  assign debug_flag = pc == 32'hf0000930;
-
-  logic [63: 0] minstret;
-
-  isa_instr_t   instr;
-  isa_instr_t   instr_last;
-  logic         freeze_pc_reg;
-
-  //! PC: program counter
-  always_ff @(posedge i_clk) begin: program_counter
+  always_ff @(posedge i_clk) begin: fetch_pipeline
     if (i_rst) begin
-      pc <= p_reset_vector - 4;
-      pc_old <= p_reset_vector - 4;
-    end else begin
-      if (i_update_pc && !i_sleep) begin
-        pc <= next_pc_tmp;
-        pc_old <= pc;
-      end
-    end
-  end
-  //assign o_pc = pc;
-
- //! instruction counter
-  always_ff @(posedge i_clk) begin: instr_counter
-    if (i_rst) begin
-      minstret <= 64'd0;
-    end else begin
-      if (i_force_instret) begin
-        minstret <= i_minstret;
-      end else if (i_update_instret) begin
-        minstret <= minstret + 1;
-      end
+      fetch_addr_q <= p_reset_vector;
+      pc_q         <= p_reset_vector - 32'd4;
+      valid_q      <= 1'b0;
+    end else if (advance) begin
+      fetch_addr_q <= next_addr;
+      pc_q         <= fetch_addr_q;
+      valid_q      <= 1'b1;
     end
   end
 
-  // assign outputs
-  assign half_npc_addr = next_pc[1];
-  assign half_pc_addr  = pc[1];
-  always_comb begin
-    o_half_npc_addr = half_npc_addr;
-    o_half_pc_addr  = half_pc_addr;
-    o_bypass_decomp = (pc == p_reset_vector - 4) ? 1'b1 : 1'b0;
-  end
+  // the instruction memory is mapped at `p_reset_vector`; the bus carries the
+  // offset inside that region
+  assign ibus_addr    = fetch_addr_q & ~p_reset_vector;
+  assign ibus_be      = 4'b0000;
+  assign ibus_wr_en   = 1'b0;
+  assign ibus_wr_data = 32'd0;
+  assign ibus_rd_en   = advance;
 
-  assign pc_inc       = i_compressed ? pc + 2 : pc + 4;
-  /*always_ff @(posedge i_clk) begin
-    o_pc_inc      <= pc_inc;
-    o_pc          <= pc;
-    o_minstret    <= minstret;
-  end*/
-  always_comb begin
-    o_pc_inc      = pc/*_inc*/;
-    o_pc          = pc_old;
-    o_minstret    = minstret;
-  end
-
-  always_ff @(posedge i_clk) begin
-    alu_out_sync <= i_alu_out;
-  end
-
-  assign alu_out = (p_branch_buf && i_sel_pc == pc_alu) ? alu_out_sync : i_alu_out;
-
-  always_comb begin: next_pc_value
-    if (i_freeze_pc) begin
-      next_pc_tmp = pc;
-    end else begin
-      case (i_sel_pc)
-        pc_none   : next_pc_tmp = pc;
-        pc_plus_4 : next_pc_tmp = pc_inc;
-        pc_alu    : next_pc_tmp = alu_out & 32'hfffffffe;
-        pc_imm    : next_pc_tmp = i_jump_pc + $signed(i_imm);
-        pc_rf     : next_pc_tmp = i_rf_rd1_data;
-        default   : next_pc_tmp = pc_inc;
-      endcase
-    end
-  end
-
-  always_comb begin
-      case (i_sel_pc)
-        pc_none   : next_pc = pc;
-        pc_plus_4 : next_pc = pc_inc;
-        pc_alu    : next_pc = alu_out & 32'hfffffffe;
-        pc_imm    : next_pc = i_jump_pc + $signed(i_imm);
-        pc_rf     : next_pc = i_rf_rd1_data;
-        default   : next_pc = pc_inc;
-      endcase
-  end
-
-  //! instruction fetch in imem
-  always_ff @(posedge i_clk) begin: fetch
-    ibus_rd_en     <= 1'b1;
-    //if (i_en_fetch) begin
-      ibus_wr_en   <= 1'b0;
-      ibus_be      <= 4'b0000;
-      if (!i_hold_fetch_addr) begin
-        if (i_offset_pc) begin
-          fetch_addr  <= (next_pc + 2) & ~p_reset_vector;
-        end else begin
-          fetch_addr  <= next_pc & ~p_reset_vector;
-        end
-      end
-      ibus_wr_data <= 32'd0;
-    //end 
-  end 
-
-  always_ff @(posedge i_clk) begin
-    freeze_pc_reg <= i_freeze_pc_test;
-    //if (!i_freeze_pc_test) begin
-      instr_last <= instr;
-    //end
-  end 
-
-
-  always_comb begin/*
-    if (!i_freeze_pc_test) begin*/
-      ibus_addr = fetch_addr;
-    /*end else begin
-      ibus_addr = pc;
-    end*/
-  end
-
-  always_comb begin
-    if (i_rst) begin
-      instr = ibus_rd_data;
-    end else begin
-      instr = (i_en_fetch && !freeze_pc_reg) ? ibus_rd_data : instr_last;
-      //instr = (i_en_fetch) ? ibus_rd_data : instr;
-    end
-  end
-
-  always_comb begin
-    o_instr.code = instr;
-  end
+  assign o_pc         = pc_q;
+  assign o_pc_inc     = pc_q + 32'd4;
+  assign o_instr.code = ibus_rd_data;
+  assign o_valid      = valid_q;
 
 endmodule
 
