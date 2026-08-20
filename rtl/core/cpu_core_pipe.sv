@@ -896,6 +896,7 @@ module cpu_core_pipe
         .i_jalr_instr   ( jalr_instr_bp         ),
         .i_imm          ( imm_bp                ),
         .i_pc           ( pc_IC                 ),
+        .i_pc_inc       ( pc_inc_IC             ),
         .o_predicted_pc (                       ),
         .o_predict_taken( predict_taken         )
       );

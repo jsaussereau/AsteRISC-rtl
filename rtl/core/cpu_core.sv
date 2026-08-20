@@ -126,6 +126,9 @@ module cpu_core
   wire          wb_state;                 //! fsm currently in wb state
   wire          cond_branch;              //! conditionnal branch
   wire          jump_reg;                 //! jump register
+  wire          bad_predict;              //! speculative branch target was incorrect
+  wire          speculate_branch;         //! launch speculative conditional branch fetch
+  wire          resolve_branch;           //! resolve speculative conditional branch fetch
 
   // regfile
   wire          rf_rd1_en;                //! read first register (used only if p_rf_sp = 1)
@@ -353,7 +356,9 @@ module cpu_core
     .o_en_dmem_wr   ( en_dmem_wr      ),
     .o_en_dmem_rd   ( en_dmem_rd      ),
     .o_en_wb        ( en_wb           ),
-    .o_wb_state     ( wb_state        )
+    .o_wb_state     ( wb_state        ),
+    .o_speculate_branch( speculate_branch ),
+    .o_resolve_branch( resolve_branch )
   );
   
   //! fetch stage
@@ -384,6 +389,8 @@ module cpu_core
     .i_compressed   ( compressed      ),
     .i_offset_pc    ( offset_pc       ),
     .i_wb_state     ( wb_state        ),
+    .i_speculate_branch( speculate_branch ),
+    .i_resolve_branch( resolve_branch ),
     .i_sel_pc       ( sel_pc          ),
     .i_alu_out      ( alu_out         ),
     .i_imm          ( imm             ),

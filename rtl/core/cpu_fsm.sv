@@ -79,7 +79,9 @@ module cpu_fsm
   output logic         o_en_dmem_wr,  //! data memory write enable
   output logic         o_en_dmem_rd,  //! data memory read enable
   output logic         o_en_wb,       //! write back enable
-  output logic         o_wb_state     //! currently in write back state
+  output logic         o_wb_state,    //! currently in write back state
+  output logic         o_speculate_branch, //! launch a conditional branch prediction
+  output logic         o_resolve_branch    //! resolve a pending conditional branch prediction
 );
 
   typedef enum logic [3:0] {
@@ -92,6 +94,7 @@ module cpu_fsm
     st_read_rf_sp,
     st_execute,
     st_execute_buf,
+    st_branch_recover,
     st_atom_memory,
     st_memory,
     st_memory_prebuf,
@@ -119,8 +122,14 @@ module cpu_fsm
   logic mem_en_wb;
 
   logic state_change;
+  logic branch_prediction_pending;
 
   logic [ 7: 0] state_counter;
+
+  localparam logic static_branch_pred = (p_branch_pred == 1);
+  wire speculative_cond_branch = static_branch_pred && p_branch_buf && i_cond_branch;
+  wire wait_for_branch_result = p_branch_buf &&
+                                (i_jump_reg || (i_cond_branch && !static_branch_pred));
 
   //! determine mealy machine outputs
   always_comb begin
@@ -142,6 +151,19 @@ module cpu_fsm
       if (!i_sleep) begin
         curr_state <= next_state;
         last_state <= curr_state;
+      end
+    end
+  end
+
+  always_ff @(posedge i_clk) begin: update_branch_prediction_pending
+    if (i_rst) begin
+      branch_prediction_pending <= 1'b0;
+    end else if (!i_sleep) begin
+      if (curr_state == st_execute_buf && branch_prediction_pending && !i_ibus_busy) begin
+        branch_prediction_pending <= 1'b0;
+      end else if (curr_state == st_execute && speculative_cond_branch &&
+                   exec_en_fetch && state_change) begin
+        branch_prediction_pending <= 1'b1;
       end
     end
   end
@@ -197,7 +219,26 @@ module cpu_fsm
         end
       end
       st_execute_buf: begin
-        next_state = st_write_back;
+        if (branch_prediction_pending) begin
+          if (i_ibus_busy) begin
+            next_state = st_execute_buf;
+            state_change = 1'b0;
+          end else if (i_bad_predict) begin
+            next_state = st_branch_recover;
+          end else begin
+            next_state = fetch_next_state;
+          end
+        end else begin
+          next_state = st_write_back;
+        end
+      end
+      st_branch_recover: begin
+        if (!i_ibus_busy) begin
+          next_state = fetch_next_state;
+        end else begin
+          next_state = st_branch_recover;
+          state_change = 1'b0;
+        end
       end
       st_memory_prebuf: begin
         next_state = st_memory;
@@ -242,6 +283,9 @@ module cpu_fsm
 
   //! decode output signals
   always_comb begin: output_signals
+    o_speculate_branch = 1'b0;
+    o_resolve_branch   = 1'b0;
+
     case (curr_state)
       st_init: begin
         o_en_fetch    = 1'b1;          // fetch the first instruction
@@ -342,8 +386,10 @@ module cpu_fsm
         o_wb_state    = 1'b0;
       end
       st_execute: begin
-        o_en_fetch    = exec_en_fetch && !(p_branch_buf && (i_cond_branch || i_jump_reg)) && state_change;
-        o_update_pc   = exec_en_fetch && !(p_branch_buf && (i_cond_branch || i_jump_reg)) && state_change;
+        o_speculate_branch = speculative_cond_branch && exec_en_fetch && state_change;
+        o_en_fetch    = exec_en_fetch && !wait_for_branch_result && state_change;
+        o_update_pc   = exec_en_fetch && !wait_for_branch_result &&
+                        !speculative_cond_branch && state_change;
         o_en_decomp   = p_decode_buf ? 1'b0 : 1'b1;
         o_update_comp = 1'b0;
         o_en_decode   = 1'b1;
@@ -356,8 +402,9 @@ module cpu_fsm
         o_wb_state    = 1'b0;
       end
       st_execute_buf: begin
-        o_en_fetch    = exec_en_fetch;
-        o_update_pc   = exec_en_fetch;
+        o_resolve_branch   = branch_prediction_pending && !i_ibus_busy;
+        o_en_fetch    = exec_en_fetch && !branch_prediction_pending;
+        o_update_pc   = branch_prediction_pending ? !i_ibus_busy : exec_en_fetch;
         o_en_decomp   = 1'b0;
         o_update_comp = 1'b0;
         o_en_decode   = 1'b1;
@@ -365,6 +412,20 @@ module cpu_fsm
         o_en_rf_rd2   = 1'b0;
         o_en_exec     = 1'b0;
         o_en_dmem_wr  = 1'b0; 
+        o_en_dmem_rd  = 1'b0;
+        o_en_wb       = 1'b0;
+        o_wb_state    = 1'b0;
+      end
+      st_branch_recover: begin
+        o_en_fetch    = 1'b0;
+        o_update_pc   = 1'b0;
+        o_en_decomp   = 1'b0;
+        o_update_comp = 1'b0;
+        o_en_decode   = 1'b0;
+        o_en_rf_rd1   = 1'b0;
+        o_en_rf_rd2   = 1'b0;
+        o_en_exec     = 1'b0;
+        o_en_dmem_wr  = 1'b0;
         o_en_dmem_rd  = 1'b0;
         o_en_wb       = 1'b0;
         o_wb_state    = 1'b0;

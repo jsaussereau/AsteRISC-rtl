@@ -40,6 +40,7 @@ module cpu_static_branch_predictor
   input  wire          i_jalr_instr,      //! jalr instruction
   input  wire  [31: 0] i_imm,             //! immediate value
   input  wire  [31: 0] i_pc,              //! program counter
+  input  wire  [31: 0] i_pc_inc,          //! sequential program counter
   output wire  [31: 0] o_predicted_pc,    //! predicted pc value
   output wire          o_predict_taken    //! the control transfer is predicted taken
 );
@@ -59,7 +60,7 @@ module cpu_static_branch_predictor
     if (predict_taken) begin
       predicted_pc = i_pc + $signed(i_imm);
     end else begin
-      predicted_pc = i_pc + 4;
+      predicted_pc = i_pc_inc;
     end
   end
 

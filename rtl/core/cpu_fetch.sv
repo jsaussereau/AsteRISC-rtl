@@ -69,6 +69,8 @@ module cpu_fetch
   input  wire          i_compressed,      //! instruction is compressed
   input  wire          i_offset_pc,       //! force fetching next pc
   input  wire          i_wb_state,        //! currently in write back state
+  input  wire          i_speculate_branch,//! launch a speculative conditional branch fetch
+  input  wire          i_resolve_branch,  //! resolve a speculative conditional branch fetch
   input  sel_pc_e      i_sel_pc,          //! program counter select
   input  wire  [31: 0] i_alu_out,         //! ALU output
   input  wire  [31: 0] i_imm,             //! immediate value
@@ -102,30 +104,22 @@ module cpu_fetch
   logic [31: 0] next_pc;                  //! next program counter value
   logic [31: 0] computed_pc;              //! computed pc value
   logic [31: 0] predicted_pc;             //! predicted pc value
+  logic [31: 0] resolved_pc;              //! resolved pc value for a speculative branch
   logic         bad_predict;
-  wire          bad_predict_gate;
-  wire          bad_predict_pulse;
+  wire          start_prediction;
 
-  logic         branch_instr;             //!
-  logic         fetch_alternate;          //!
-  logic [31: 0] ibus_rd_data_saved;       //!
-
-  sel_pc_e      sel_pc_reg;               //!
-  logic         en_fetch_reg;             //!
-  logic [31: 0] imm_reg;                  //!
-  logic [31: 0] rf_rd1_data_reg;          //!
-  logic [31: 0] pc_reg;                   //!
-  logic [31: 0] pc_inc_reg;               //!
   logic [31: 0] pc_reg_out;               //!
   logic [31: 0] pc_inc_reg_out;           //!
   logic [63: 0] minstret_reg_out;         //! 
-  logic [31: 0] computed_pc_reg;          //! computed pc value
   logic [31: 0] predicted_pc_reg;         //! predicted pc value
+  logic [31: 0] predicted_src_pc_reg;     //! source pc of a speculative branch
+  logic [31: 0] predicted_src_pc_inc_reg; //! source sequential pc of a speculative branch
+  logic [31: 0] predicted_src_imm_reg;    //! source immediate of a speculative branch
+  logic [31: 0] predicted_src_alu_out_reg;//! source alu result of a speculative branch
+  logic [31: 0] predicted_src_rf_rd1_data_reg; //! source register data of a speculative branch
+  logic         predicted_valid;          //! a speculative conditional branch is in flight
   logic [31: 0] instr_code;               //! instruction word selected from the bus
   logic [31: 0] ibus_rd_data_reg;         //! buffered intruction from memory
-  logic         bad_predict_reg;          //!
-  logic         fetch_alternate_reg;      //!
-  logic         bad_predict_gate_reg;
 
   isa_instr_t   instr;                    //! instruction to 'decode' stage
 
@@ -142,12 +136,13 @@ module cpu_fetch
       pc <= p_reset_vector - 4;
       minstret <= 64'd0;
     end else begin
-      if (i_update_pc && !i_sleep) begin
-        pc <= next_pc;
-        minstret <= minstret + 1;
-      end
-      if (bad_predict_pulse && branch_instr) begin
-        pc <= next_pc;
+      if ((i_update_pc || start_prediction) && !i_sleep) begin
+        if (!i_resolve_branch || bad_predict) begin
+          pc <= next_pc;
+        end
+        if (i_update_pc) begin
+          minstret <= minstret + 1;
+        end
       end
     end
   end
@@ -161,67 +156,78 @@ module cpu_fetch
   end
 
   always_ff @(posedge i_clk) begin
-    if (!(fetch_alternate && bad_predict)) begin
+    if (!bad_predict) begin
       pc_reg_out        <= pc;
       pc_inc_reg_out    <= pc_inc;
       minstret_reg_out  <= minstret;
     end
-    pc_reg              <= pc;
-    pc_inc_reg          <= pc_inc;
     alu_out_reg         <= i_alu_out;
-    imm_reg             <= i_imm;
-    rf_rd1_data_reg     <= i_rf_rd1_data;
-    sel_pc_reg          <= i_sel_pc;
-    en_fetch_reg        <= i_en_fetch;
     ibus_rd_data_reg    <= instr_code;
-    //computed_pc_reg     <= computed_pc;
-    predicted_pc_reg    <= predicted_pc;
-    bad_predict_gate_reg<= bad_predict_gate;
-    fetch_alternate_reg <= fetch_alternate;
   end
 
-  if (p_branch_pred) begin
-    //! compute the next program counter value
-    always_comb begin: compute_pc_value
-      if (i_freeze_pc) begin
-        computed_pc_reg = pc_reg;
-      end else begin
-        case (sel_pc_reg)
-          pc_none   : computed_pc_reg = pc_reg;
-          pc_plus_4 : computed_pc_reg = pc_inc_reg;
-          pc_alu    : computed_pc_reg = alu_out_reg & 32'hfffffffe;
-          pc_imm    : computed_pc_reg = pc_reg + $signed(imm_reg);
-          pc_rf     : computed_pc_reg = rf_rd1_data_reg;
-          default   : computed_pc_reg = pc_inc_reg;
-        endcase
-      end
+  always_comb begin: compute_pc_value
+    if (i_freeze_pc) begin
+      computed_pc = pc;
+    end else begin
+      case (i_sel_pc)
+        pc_none   : computed_pc = pc;
+        pc_plus_4 : computed_pc = pc_inc;
+        pc_alu    : computed_pc = alu_out & 32'hfffffffe;
+        pc_imm    : computed_pc = pc + $signed(i_imm);
+        pc_rf     : computed_pc = i_rf_rd1_data;
+        default   : computed_pc = pc_inc;
+      endcase
     end
-  end else begin
-    always_comb begin: compute_pc_value
-      if (i_freeze_pc) begin
-        computed_pc = pc;
-      end else begin
-        case (i_sel_pc)
-          pc_none   : computed_pc = pc;
-          pc_plus_4 : computed_pc = pc_inc;
-          pc_alu    : computed_pc = alu_out & 32'hfffffffe;
-          pc_imm    : computed_pc = pc + $signed(i_imm);
-          pc_rf     : computed_pc = i_rf_rd1_data;
-          default   : computed_pc = pc_inc;
-        endcase
+  end
+
+  always_comb begin: compute_resolved_pc
+    if (i_freeze_pc) begin
+      resolved_pc = predicted_src_pc_reg;
+    end else begin
+      case (i_sel_pc)
+        pc_none   : resolved_pc = predicted_src_pc_reg;
+        pc_plus_4 : resolved_pc = predicted_src_pc_inc_reg;
+        pc_alu    : resolved_pc = predicted_src_alu_out_reg & 32'hfffffffe;
+        pc_imm    : resolved_pc = predicted_src_pc_reg + $signed(predicted_src_imm_reg);
+        pc_rf     : resolved_pc = predicted_src_rf_rd1_data_reg;
+        default   : resolved_pc = predicted_src_pc_inc_reg;
+      endcase
+    end
+  end
+
+  assign start_prediction = (p_branch_pred == 1) && i_speculate_branch;
+
+  always_ff @(posedge i_clk) begin
+    if (i_rst) begin
+      predicted_valid             <= 1'b0;
+      predicted_pc_reg            <= 32'd0;
+      predicted_src_pc_reg        <= 32'd0;
+      predicted_src_pc_inc_reg    <= 32'd0;
+      predicted_src_imm_reg       <= 32'd0;
+      predicted_src_alu_out_reg   <= 32'd0;
+      predicted_src_rf_rd1_data_reg <= 32'd0;
+    end else begin
+      if (i_resolve_branch && predicted_valid) begin
+        predicted_valid <= 1'b0;
+      end
+
+      if (start_prediction) begin
+        predicted_valid               <= 1'b1;
+        predicted_pc_reg              <= predicted_pc;
+        predicted_src_pc_reg          <= pc;
+        predicted_src_pc_inc_reg      <= pc_inc;
+        predicted_src_imm_reg         <= i_imm;
+        predicted_src_alu_out_reg     <= alu_out;
+        predicted_src_rf_rd1_data_reg <= i_rf_rd1_data;
       end
     end
   end
 
   always_comb begin: select_next_pc
-    if (p_branch_pred) begin
-      /*if (!branch_instr) begin
-        next_pc = computed_pc;
-      end else */if (fetch_alternate && bad_predict) begin
-        next_pc = computed_pc_reg;
-      end else begin
-        next_pc = predicted_pc;
-      end
+    if (bad_predict) begin
+      next_pc = resolved_pc;
+    end else if (start_prediction) begin
+      next_pc = predicted_pc;
     end else begin
       next_pc = computed_pc;
     end
@@ -237,6 +243,7 @@ module cpu_fetch
       .i_clk          ( i_clk           ),
       .i_rst          ( i_rst           ),
       .i_pc           ( pc              ),
+      .i_pc_inc       ( pc_inc          ),
       .i_instr        ( ibus_rd_data    ),
       .i_en           ( i_en_fetch      ),
       .i_cond_br_bp   ( i_cond_br_bp    ),
@@ -245,13 +252,11 @@ module cpu_fetch
       .i_imm_bp       ( i_imm_bp        ),
       .o_predicted_pc ( predicted_pc    ),
       .o_predict_taken(                 ),
-      .o_branch_instr ( branch_instr    )
+      .o_branch_instr (                 )
     );
   end else begin
     always_comb begin
       predicted_pc = 32'b0;
-      branch_instr = 1'b0;
-      /*bad_predict  =  1'b0;*/
     end
   end
 
@@ -260,26 +265,13 @@ module cpu_fetch
     fetch_addr = next_pc;
   end
 
-  always_comb begin
-    fetch_alternate = (p_branch_pred != 0) & en_fetch_reg & branch_instr;
-    /*if (fetch_alternate_reg) begin
-      ibus_rd_data_saved = ibus_rd_data;
-    end*/
-  end
-
-  always_ff @(posedge i_clk) begin
-    if (fetch_alternate) begin
-      ibus_rd_data_saved <= ibus_rd_data;
-    end
-  end
-
   //! instruction fetch from imem
   always_ff @(posedge i_clk) begin: fetch
-    ibus_rd_en   <= i_en_fetch | (fetch_alternate & bad_predict);
+    ibus_rd_en   <= i_en_fetch | bad_predict;
     ibus_wr_data <= 32'd0;
     ibus_wr_en   <= 1'b0;
     ibus_be      <= 4'b0000;
-    if (i_en_fetch || fetch_alternate) begin
+    if (i_en_fetch || bad_predict) begin
       if (i_offset_pc) begin
         ibus_addr  <= (fetch_addr + 2) & ~p_reset_vector;
       end else begin
@@ -290,35 +282,29 @@ module cpu_fetch
 
   // check if prediction was right
   always_comb begin
-    if (predicted_pc_reg != computed_pc_reg) begin
-      bad_predict = (p_branch_pred != 0); // only a bad prediction if prediction is enabled
+    if (predicted_valid && i_resolve_branch &&
+        (predicted_pc_reg != resolved_pc)) begin
+      bad_predict = 1'b1;
     end else begin
       bad_predict = 1'b0;
     end
   end
 
-  // select the instruction word: on a mispredict the alternate path was saved
+  // The wrong-path instruction is never presented to the decompressor.
   always_comb begin
-    if (p_branch_pred && fetch_alternate_reg && bad_predict) begin
-      instr_code = ibus_rd_data_saved;
-    end else begin
-      instr_code = ibus_rd_data;
-    end
+    instr_code = ibus_rd_data;
   end
 
   //! optionnal fetch stage output buffer: cuts the imem read data path at the
   //! cost of one extra cycle per instruction (Fmax vs IPC trade-off)
   assign instr.code = p_fetch_buf ? ibus_rd_data_reg : instr_code;
 
-  assign bad_predict_gate = bad_predict & i_wb_state;
-  assign bad_predict_pulse = bad_predict_gate & (bad_predict_gate^bad_predict_gate_reg);
-
   // assign outputs
   assign o_instr.code    = instr;
   assign o_pc            = pc_reg_out;
   assign o_pc_inc        = pc_inc_reg_out;
   assign o_minstret      = p_counters ? minstret_reg_out : 64'b0;
-  assign o_bad_predict   = bad_predict_pulse;
+  assign o_bad_predict   = bad_predict;
   assign o_bypass_decomp = bypass_decomp;
   assign o_half_npc_addr = half_npc_addr;
   assign o_half_pc_addr  = half_pc_addr;

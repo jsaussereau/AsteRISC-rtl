@@ -49,6 +49,7 @@ module cpu_branch_predictor
   input  wire          i_rst,             //! global reset
  
   input  wire  [31: 0] i_pc,              //! program counter
+  input  wire  [31: 0] i_pc_inc,          //! sequential program counter
   input  isa_instr_t   i_instr,           //! instruction to be analyzed
   input  wire          i_en,              //! enable
   input  wire          i_cond_br_bp,      //! conditionnal branch (inconditionnal branches jal and jalr are excluded) (unregistered)
@@ -131,6 +132,7 @@ module cpu_branch_predictor
     .i_jalr_instr   ( jalr_instr_bp ),
     .i_imm          ( imm_bp        ),
     .i_pc           ( i_pc          ),
+    .i_pc_inc       ( i_pc_inc      ),
     .o_predicted_pc ( predicted_pc  ),
     .o_predict_taken( predict_taken )
   );
