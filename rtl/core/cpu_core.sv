@@ -197,35 +197,36 @@ module cpu_core
   logic [63: 0] minstret;
   logic [31: 0] csr_rd_data;              //! read data from csr
 
-  // debug signals used for log
-  wire          debug_valid      = 1'b1;
-  wire  [31: 0] debug_imm        = imm;
-  wire  [31: 0] debug_rs1_addr   = rf_rd1_addr;
-  wire  [31: 0] debug_rs1_data   = rf_rd1_data;
-  wire          debug_rs2_used   = rf_rd2_used;
-  wire  [31: 0] debug_rs2_addr   = rf_rd2_addr;
-  wire  [31: 0] debug_rs2_data   = rf_rd2_data;
-  wire  [31: 0] debug_wb_addr    = rf_wr_addr;
-  wire  [31: 0] debug_wb_data    = rf_wr_data;
-  wire          debug_wb_en      = wb;
-  wire          debug_br_taken   = branch_taken;
+  // debug packet captured at instruction commit
+  logic         debug_valid;
+  logic [31: 0] debug_imm;
+  logic [31: 0] debug_rs1_addr;
+  logic [31: 0] debug_rs1_data;
+  logic         debug_rs2_used;
+  logic [31: 0] debug_rs2_addr;
+  logic [31: 0] debug_rs2_data;
+  logic [31: 0] debug_wb_addr;
+  logic [31: 0] debug_wb_data;
+  logic         debug_wb_en;
+  logic         debug_br_taken;
   logic [31: 0] debug_pc;
   logic [63: 0] debug_instret;
   isa_instr_e   debug_instr_name;
-  wire  [31: 0] debug_instr_code = instr_decomp;
-  //logic [31: 0] debug_instr_code;
-  logic [31: 0] debug_pc_tmp;
-  logic [63: 0] debug_instret_tmp;
-  isa_instr_e   debug_instr_name_tmp;
-  logic [31: 0] debug_instr_code_tmp;
-  logic [31: 0] debug_pc_tmp2;
-  logic [63: 0] debug_instret_tmp2;
-  isa_instr_e   debug_instr_name_tmp2;
-  logic [31: 0] debug_instr_code_tmp2;
-  logic [31: 0] debug_pc_tmp3;
-  logic [63: 0] debug_instret_tmp3;
-  isa_instr_e   debug_instr_name_tmp3;
-  logic [31: 0] debug_instr_code_tmp3;
+  logic [31: 0] debug_instr_code;
+
+  logic [31: 0] debug_pc_pending;
+  logic [63: 0] debug_instret_pending;
+  isa_instr_e   debug_instr_name_pending;
+  logic [31: 0] debug_instr_code_pending;
+  logic [31: 0] debug_imm_pending;
+  logic [31: 0] debug_rs1_addr_pending;
+  logic [31: 0] debug_rs1_data_pending;
+  logic         debug_rs2_used_pending;
+  logic [31: 0] debug_rs2_addr_pending;
+  logic [31: 0] debug_rs2_data_pending;
+  logic         debug_br_taken_pending;
+  logic [ 4: 0] debug_wb_addr_pending;
+  logic [63: 0] debug_order;
 
   wire          debug_bp_rs1_ex  = 0;
   wire          debug_bp_rs1_ma  = 0;
@@ -236,31 +237,71 @@ module cpu_core
   wire          debug_stall_rs1  = 0;
   wire          debug_stall_rs2  = 0;
 
-  //TODO: rewrite this quick and dirty shenanigan
-  //TODO: use the parameters or the fsm to control registers
+  //! commit point of an instruction writing back to the register file.
+  //! when p_wb_buf is set, the write back stage registers its inputs: the actual
+  //! regfile write (and therefore the data to log) happens one cycle after en_wb.
+  wire          debug_en_wb = p_wb_buf ? rf_wr_en : en_wb;
+
   always_ff @(posedge i_clk) begin
-    debug_pc_tmp <= pc;
-    debug_instret_tmp <= minstret;
-    debug_instr_code_tmp <= instr_decomp;
-    debug_instr_name_tmp <= instr_name;
-    debug_pc_tmp2 <= debug_pc_tmp;
-    debug_instret_tmp2 <= debug_instret_tmp;
-    debug_instr_name_tmp2 <= debug_instr_name_tmp;
-    debug_instr_code_tmp2 <= debug_instr_code_tmp;
-    debug_pc_tmp3 <= debug_pc_tmp2;
-    debug_instret_tmp3 <= debug_instret_tmp2;
-    debug_instr_name_tmp3 <= debug_instr_name_tmp2;
-    debug_instr_code_tmp3 <= debug_instr_code_tmp2;
-    if (dmem_rd) begin
-      debug_pc <= debug_pc_tmp3;
-      debug_instret <= debug_instret_tmp3;
-      debug_instr_name <= debug_instr_name_tmp3;
-      //debug_instr_code <= debug_instr_code_tmp3;
+    if (i_rst) begin
+      debug_valid            <= 1'b0;
+      debug_instret          <= 64'd0;
+      debug_order            <= 64'd0;
+      debug_wb_en            <= 1'b0;
     end else begin
-      debug_pc <= debug_pc_tmp2;
-      debug_instret <= debug_instret_tmp2;
-      debug_instr_name <= debug_instr_name_tmp2;
-      //debug_instr_code <= debug_instr_code_tmp2;
+      debug_valid <= 1'b0;
+
+      if (update_pc) begin
+        debug_pc_pending          <= pc;
+        debug_instret_pending     <= p_counters ? minstret + 1'b1 : debug_order + 1'b1;
+        debug_instr_name_pending  <= instr_name;
+        debug_instr_code_pending  <= instr_decomp.code;
+        debug_imm_pending          <= imm;
+        debug_rs1_addr_pending     <= rf_rd1_addr;
+        debug_rs1_data_pending     <= rf_rd1_data;
+        debug_rs2_used_pending     <= rf_rd2_used;
+        debug_rs2_addr_pending     <= rf_rd2_addr;
+        debug_rs2_data_pending     <= rf_rd2_data;
+        debug_br_taken_pending     <= branch_taken;
+        debug_wb_addr_pending      <= wb_addr;
+        debug_order                <= debug_order + 1'b1;
+
+        if (!wb) begin
+          debug_valid      <= 1'b1;
+          debug_pc         <= pc;
+          debug_instret    <= p_counters ? minstret + 1'b1 : debug_order + 1'b1;
+          debug_instr_name <= instr_name;
+          debug_instr_code <= instr_decomp.code;
+          debug_imm        <= imm;
+          debug_rs1_addr   <= rf_rd1_addr;
+          debug_rs1_data   <= rf_rd1_data;
+          debug_rs2_used   <= rf_rd2_used;
+          debug_rs2_addr   <= rf_rd2_addr;
+          debug_rs2_data   <= rf_rd2_data;
+          debug_wb_en      <= 1'b0;
+          debug_wb_addr    <= 5'd0;
+          debug_wb_data    <= 32'd0;
+          debug_br_taken   <= branch_taken;
+        end
+      end
+
+      if (debug_en_wb) begin
+        debug_valid      <= 1'b1;
+        debug_pc         <= debug_pc_pending;
+        debug_instret    <= debug_instret_pending;
+        debug_instr_name <= debug_instr_name_pending;
+        debug_instr_code <= debug_instr_code_pending;
+        debug_imm        <= debug_imm_pending;
+        debug_rs1_addr   <= debug_rs1_addr_pending;
+        debug_rs1_data   <= debug_rs1_data_pending;
+        debug_rs2_used   <= debug_rs2_used_pending;
+        debug_rs2_addr   <= debug_rs2_addr_pending;
+        debug_rs2_data   <= debug_rs2_data_pending;
+        debug_wb_en      <= 1'b1;
+        debug_wb_addr    <= debug_wb_addr_pending;
+        debug_wb_data    <= rf_wr_data;
+        debug_br_taken   <= debug_br_taken_pending;
+      end
     end
   end
 
@@ -553,43 +594,43 @@ module cpu_core
 
   function [31: 0] get_imm();
     // verilator public
-    get_imm = imm;
+    get_imm = debug_imm;
   endfunction
   function [31: 0] get_rs1_addr();
     // verilator public
-    get_rs1_addr = rf_rd1_addr;
+    get_rs1_addr = debug_rs1_addr;
   endfunction
   function [31: 0] get_rs1_data();
     // verilator public
-    get_rs1_data = rf_rd1_data;
+    get_rs1_data = debug_rs1_data;
   endfunction
   function get_rs2_used();
     // verilator public
-    get_rs2_used = rf_rd2_used;
+    get_rs2_used = debug_rs2_used;
   endfunction
   function [31: 0] get_rs2_addr();
     // verilator public
-    get_rs2_addr = rf_rd2_addr;
+    get_rs2_addr = debug_rs2_addr;
   endfunction
   function [31: 0] get_rs2_data();
     // verilator public
-    get_rs2_data = rf_rd2_data;
+    get_rs2_data = debug_rs2_data;
   endfunction
   function [31: 0] get_wb_addr();
     // verilator public
-    get_wb_addr  = rf_wr_addr;
+    get_wb_addr  = debug_wb_addr;
   endfunction
   function [31: 0] get_wb_data();
     // verilator public
-    get_wb_data = rf_wr_data;
+    get_wb_data = debug_wb_data;
   endfunction
   function get_wb_en();
     // verilator public
-    get_wb_en = wb;
+    get_wb_en = debug_wb_en;
   endfunction
   function get_br_taken();
     // verilator public
-    get_br_taken = branch_taken;
+    get_br_taken = debug_br_taken;
   endfunction
   function [31: 0] get_pc();
   // verilator public
@@ -598,6 +639,10 @@ module cpu_core
   function [63: 0] get_instret();
   // verilator public
     get_instret = debug_instret;
+  endfunction
+  function get_valid();
+  // verilator public
+    get_valid = debug_valid;
   endfunction
   function string  get_instr_name();
   // verilator public
