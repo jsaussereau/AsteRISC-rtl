@@ -77,7 +77,14 @@ module cpu_core
   parameter p_mem_buf      = 0,           //! add buffers to mem stage inputs
   parameter p_wb_buf       = 0,           //! add buffers to write back stage inputs
   parameter p_branch_buf   = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
-  parameter p_wait_for_ack = 0            //! wait for data bus acknowledgement
+  parameter p_wait_for_ack = 0,           //! wait for data bus acknowledgement
+
+  //! fold the write back state into the execute state: the instruction bus is
+  //! driven combinationally so the next instruction word is already available
+  //! when execute ends, bringing the straight line loop from 2 cycles down to 1
+  //! (loads stay at 3). Costs the `imem data -> decode -> next pc -> imem addr`
+  //! path. See `cpu_fsm` for the sequencing and the restrictions.
+  parameter p_overlap      = 0
 )(
   // global
   input  logic         i_clk,             //! global clock: triggers with a rising edge
@@ -117,7 +124,28 @@ module cpu_core
 
   initial begin
     assert(!p_rf_sp || p_rf_read_buf) else $error("parameter \"p_rf_sp\" cannot be enabled if \"p_rf_read_buf\" is disabled: cannot read asynchronously through two ports on a single port RAM.");
+    // `p_overlap` merges the write back into the execute cycle, so the result of
+    // an instruction has to reach the register file before the next instruction
+    // reads it, in the very next cycle.
+    //
+    // `p_wb_buf` and `p_rf_read_buf` push the write past that point; they are
+    // covered by the depth-1 register file bypass (`p_rf_bypass` below), so both
+    // remain legal with `p_overlap`. `p_rf_sp` is not: a single port array
+    // physically cannot serve the write and the next read at once, which no
+    // amount of forwarding fixes. `p_fetch_buf`, `p_decode_buf` and
+    // `p_branch_buf` are sequencing problems rather than data hazards -- the
+    // extra state no longer lines up with the cycle that consumes it -- and are
+    // left unsupported.
+    assert(!p_overlap || !p_fetch_buf)   else $error("parameter \"p_overlap\" cannot be enabled together with \"p_fetch_buf\".");
+    assert(!p_overlap || !p_decode_buf)  else $error("parameter \"p_overlap\" cannot be enabled together with \"p_decode_buf\".");
+    assert(!p_overlap || !p_rf_sp)       else $error("parameter \"p_overlap\" cannot be enabled together with \"p_rf_sp\": the single port register file cannot serve the merged write back and the next register read in the same cycle.");
+    assert(!p_overlap || !p_branch_buf)  else $error("parameter \"p_overlap\" cannot be enabled together with \"p_branch_buf\".");
   end
+
+  //! depth-1 forward from the pending write back to the register file read
+  //! ports. Only `p_overlap` can create the hazard it covers: without it the
+  //! write back has a state of its own and always lands before the next read.
+  localparam p_rf_bypass = (p_overlap != 0) && (p_wb_buf != 0);
 
   // fsm
   wire          exec_done;                //! execute stage done
@@ -259,14 +287,33 @@ module cpu_core
   //! regfile write (and therefore the data to log) happens one cycle after en_wb.
   wire          debug_en_wb = p_wb_buf ? rf_wr_en : en_wb;
 
+  //! with `p_overlap` the write back is merged into the execute state, so an
+  //! instruction is issued and committed on the same clock edge: the record has
+  //! to be built from the live signals instead of the pending copies, which at
+  //! that point still describe the previous instruction. `p_wb_buf` puts the
+  //! commit back one cycle after the issue, so the pending copies are right
+  //! again and the live signals are the ones that are wrong.
+  wire          debug_same_cycle = (p_overlap != 0) && !p_wb_buf && update_pc;
+
+  //! `p_overlap` with `p_wb_buf` is the one case where two instructions want to
+  //! log in the same cycle: `i` commits its buffered write back while `i+1`,
+  //! which writes no register, is issued. The trace has a single record, so the
+  //! non-write-back path is delayed by one cycle here too, which makes the two
+  //! paths mutually exclusive again (`i+1` then logs in the following cycle,
+  //! from the pending copies, which by then describe it).
+  localparam    debug_defer_nowb = (p_overlap != 0) && (p_wb_buf != 0);
+  logic         debug_nowb_deferred;
+
   always_ff @(posedge i_clk) begin
     if (i_rst) begin
       debug_valid            <= 1'b0;
+      debug_nowb_deferred    <= 1'b0;
       debug_instret          <= 64'd0;
       debug_order            <= 64'd0;
       debug_wb_en            <= 1'b0;
     end else begin
       debug_valid <= 1'b0;
+      debug_nowb_deferred <= update_pc && !wb;
 
       if (update_pc) begin
         debug_pc_pending          <= pc;
@@ -282,42 +329,44 @@ module cpu_core
         debug_br_taken_pending     <= branch_taken;
         debug_wb_addr_pending      <= wb_addr;
         debug_order                <= debug_order + 1'b1;
+      end
 
-        if (!wb) begin
-          debug_valid      <= 1'b1;
-          debug_pc         <= pc;
-          debug_instret    <= p_counters ? minstret + 1'b1 : debug_order + 1'b1;
-          debug_instr_name <= instr_name;
-          debug_instr_code <= instr_decomp.code;
-          debug_imm        <= imm;
-          debug_rs1_addr   <= rf_rd1_addr;
-          debug_rs1_data   <= rf_rd1_data;
-          debug_rs2_used   <= rf_rd2_used;
-          debug_rs2_addr   <= rf_rd2_addr;
-          debug_rs2_data   <= rf_rd2_data;
-          debug_wb_en      <= 1'b0;
-          debug_wb_addr    <= 5'd0;
-          debug_wb_data    <= 32'd0;
-          debug_br_taken   <= branch_taken;
-        end
+      if (debug_defer_nowb ? debug_nowb_deferred : (update_pc && !wb)) begin
+        debug_valid      <= 1'b1;
+        debug_pc         <= debug_defer_nowb ? debug_pc_pending : pc;
+        debug_instret    <= debug_defer_nowb ? debug_instret_pending
+                                             : (p_counters ? minstret + 1'b1 : debug_order + 1'b1);
+        debug_instr_name <= debug_defer_nowb ? debug_instr_name_pending : instr_name;
+        debug_instr_code <= debug_defer_nowb ? debug_instr_code_pending : instr_decomp.code;
+        debug_imm        <= debug_defer_nowb ? debug_imm_pending        : imm;
+        debug_rs1_addr   <= debug_defer_nowb ? debug_rs1_addr_pending   : {27'd0, rf_rd1_addr};
+        debug_rs1_data   <= debug_defer_nowb ? debug_rs1_data_pending   : rf_rd1_data;
+        debug_rs2_used   <= debug_defer_nowb ? debug_rs2_used_pending   : rf_rd2_used;
+        debug_rs2_addr   <= debug_defer_nowb ? debug_rs2_addr_pending   : {27'd0, rf_rd2_addr};
+        debug_rs2_data   <= debug_defer_nowb ? debug_rs2_data_pending   : rf_rd2_data;
+        debug_wb_en      <= 1'b0;
+        debug_wb_addr    <= 5'd0;
+        debug_wb_data    <= 32'd0;
+        debug_br_taken   <= debug_defer_nowb ? debug_br_taken_pending   : branch_taken;
       end
 
       if (debug_en_wb) begin
         debug_valid      <= 1'b1;
-        debug_pc         <= debug_pc_pending;
-        debug_instret    <= debug_instret_pending;
-        debug_instr_name <= debug_instr_name_pending;
-        debug_instr_code <= debug_instr_code_pending;
-        debug_imm        <= debug_imm_pending;
-        debug_rs1_addr   <= debug_rs1_addr_pending;
-        debug_rs1_data   <= debug_rs1_data_pending;
-        debug_rs2_used   <= debug_rs2_used_pending;
-        debug_rs2_addr   <= debug_rs2_addr_pending;
-        debug_rs2_data   <= debug_rs2_data_pending;
+        debug_pc         <= debug_same_cycle ? pc               : debug_pc_pending;
+        debug_instret    <= debug_same_cycle ? (p_counters ? minstret + 1'b1 : debug_order + 1'b1)
+                                             : debug_instret_pending;
+        debug_instr_name <= debug_same_cycle ? instr_name       : debug_instr_name_pending;
+        debug_instr_code <= debug_same_cycle ? instr_decomp.code: debug_instr_code_pending;
+        debug_imm        <= debug_same_cycle ? imm              : debug_imm_pending;
+        debug_rs1_addr   <= debug_same_cycle ? {27'd0, rf_rd1_addr} : debug_rs1_addr_pending;
+        debug_rs1_data   <= debug_same_cycle ? rf_rd1_data      : debug_rs1_data_pending;
+        debug_rs2_used   <= debug_same_cycle ? rf_rd2_used      : debug_rs2_used_pending;
+        debug_rs2_addr   <= debug_same_cycle ? {27'd0, rf_rd2_addr} : debug_rs2_addr_pending;
+        debug_rs2_data   <= debug_same_cycle ? rf_rd2_data      : debug_rs2_data_pending;
         debug_wb_en      <= 1'b1;
-        debug_wb_addr    <= debug_wb_addr_pending;
+        debug_wb_addr    <= debug_same_cycle ? {27'd0, wb_addr} : {27'd0, debug_wb_addr_pending};
         debug_wb_data    <= rf_wr_data;
-        debug_br_taken   <= debug_br_taken_pending;
+        debug_br_taken   <= debug_same_cycle ? branch_taken     : debug_br_taken_pending;
       end
     end
   end
@@ -334,7 +383,8 @@ module cpu_core
     .p_mem_buf      ( p_mem_buf       ),
     .p_branch_buf   ( p_branch_buf    ),
     .p_wait_for_ack ( p_wait_for_ack  ),
-    .p_wb_buf       ( p_wb_buf        )
+    .p_wb_buf       ( p_wb_buf        ),
+    .p_overlap      ( p_overlap       )
   ) fsm (
     .i_clk          ( i_clk           ),
     .i_rst          ( i_rst           ),
@@ -380,6 +430,7 @@ module cpu_core
     .p_bp_ghr_bits  ( p_bp_ghr_bits   ),
     .p_fetch_buf    ( p_fetch_buf     ),
     .p_branch_buf   ( p_branch_buf    ),
+    .p_overlap      ( p_overlap       ),
     .p_counters     ( p_counters      )
   ) fetch_stage (
     .i_clk          ( i_clk           ),
@@ -491,7 +542,8 @@ module cpu_core
   cpu_regfile #(
     .p_ext_rve      ( p_ext_rve       ),
     .p_rf_read_buf  ( p_rf_read_buf   ),
-    .p_rf_sp        ( p_rf_sp         )
+    .p_rf_sp        ( p_rf_sp         ),
+    .p_bypass       ( p_rf_bypass     )
   ) regfile (
     .i_clk          ( i_clk           ),
     .i_rst          ( i_rst           ),
