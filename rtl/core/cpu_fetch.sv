@@ -40,10 +40,14 @@ module cpu_fetch
 #(
   parameter p_reset_vector = 32'hf0000000,
   //! branch prediction scheme: 0 = off, 1 = static (backward taken / forward
-  //! not taken). Higher values are reserved for the dynamic predictors to come.
+  //! not taken), 2 = dynamic (saturating counters, optionally gshare).
   parameter p_branch_pred  = 0,           //! branch prediction scheme
+  parameter p_bp_index_bits = 5,          //! dynamic: log2 of the number of counters
+  parameter p_bp_ctr_bits   = 2,          //! dynamic: width of a saturating counter
+  parameter p_bp_ghr_bits   = 0,          //! dynamic: global history bits (0 = bimodal)
   parameter p_fetch_buf    = 0,           //! add buffers to fetch stage output
   parameter p_branch_buf   = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
+  parameter p_overlap      = 0,           //! drive the instruction bus combinationally (see `cpu_fsm`)
   parameter p_counters     = 0            //! use minstret counter
 )(
   input  wire          i_clk,             //! global clock
@@ -91,6 +95,10 @@ module cpu_fetch
   output wire  [63: 0] o_minstret         //! 
 );
 
+  //! the index is a real bus only for the dynamic scheme; elsewhere it is a
+  //! single constant bit that synthesis removes
+  localparam int BP_IDX_W = (p_branch_pred >= 2) ? p_bp_index_bits : 1;
+
   logic         half_pc_addr;
   logic         half_npc_addr;
   logic         bypass_decomp;
@@ -118,6 +126,11 @@ module cpu_fetch
   logic [31: 0] predicted_src_alu_out_reg;//! source alu result of a speculative branch
   logic [31: 0] predicted_src_rf_rd1_data_reg; //! source register data of a speculative branch
   logic         predicted_valid;          //! a speculative conditional branch is in flight
+  logic         predicted_cond_reg;       //! the speculative branch is a conditionnal one
+  logic [BP_IDX_W-1:0] predicted_index_reg; //! predictor index the speculation was made with
+  wire  [BP_IDX_W-1:0] bp_index;          //! predictor index of the current lookup
+  wire          bp_upd_valid;             //! a conditionnal branch resolved this cycle
+  wire          bp_upd_taken;             //! ...and this is its actual outcome
   logic [31: 0] instr_code;               //! instruction word selected from the bus
   logic [31: 0] ibus_rd_data_reg;         //! buffered intruction from memory
 
@@ -195,7 +208,7 @@ module cpu_fetch
     end
   end
 
-  assign start_prediction = (p_branch_pred == 1) && i_speculate_branch;
+  assign start_prediction = (p_branch_pred != 0) && i_speculate_branch;
 
   always_ff @(posedge i_clk) begin
     if (i_rst) begin
@@ -206,6 +219,8 @@ module cpu_fetch
       predicted_src_imm_reg       <= 32'd0;
       predicted_src_alu_out_reg   <= 32'd0;
       predicted_src_rf_rd1_data_reg <= 32'd0;
+      predicted_cond_reg          <= 1'b0;
+      predicted_index_reg         <= '0;
     end else begin
       if (i_resolve_branch && predicted_valid) begin
         predicted_valid <= 1'b0;
@@ -219,6 +234,8 @@ module cpu_fetch
         predicted_src_imm_reg         <= i_imm;
         predicted_src_alu_out_reg     <= alu_out;
         predicted_src_rf_rd1_data_reg <= i_rf_rd1_data;
+        predicted_cond_reg            <= i_cond_br_bp;
+        predicted_index_reg           <= bp_index;
       end
     end
   end
@@ -233,12 +250,24 @@ module cpu_fetch
     end
   end
 
-  // optionnal branch predictor (p_branch_pred == 1: static scheme)
-  if (p_branch_pred == 1) begin
+  //! the outcome of the speculation, fed back to the dynamic predictor. Only a
+  //! conditionnal branch teaches it anything: `jal` is unconditional and `jalr`
+  //! is never predicted. The verdict is read off the resolved target, which is
+  //! the sequential address exactly when the branch was not taken.
+  assign bp_upd_valid = (p_branch_pred >= 2) & predicted_valid & i_resolve_branch
+                      & predicted_cond_reg;
+  assign bp_upd_taken = (resolved_pc != predicted_src_pc_inc_reg);
+
+  // optionnal branch predictor (1 = static scheme, 2 = dynamic scheme)
+  if (p_branch_pred != 0) begin
     cpu_branch_predictor #(
       .p_reset_vector ( p_reset_vector  ),
       .p_branch_buf   ( p_branch_buf    ),
-      .p_mini_decoder ( 0               )
+      .p_mini_decoder ( 0               ),
+      .p_branch_pred  ( p_branch_pred   ),
+      .p_bp_index_bits( BP_IDX_W        ),
+      .p_bp_ctr_bits  ( p_bp_ctr_bits   ),
+      .p_bp_ghr_bits  ( p_bp_ghr_bits   )
     ) branch_predictor ( 
       .i_clk          ( i_clk           ),
       .i_rst          ( i_rst           ),
@@ -252,12 +281,17 @@ module cpu_fetch
       .i_imm_bp       ( i_imm_bp        ),
       .o_predicted_pc ( predicted_pc    ),
       .o_predict_taken(                 ),
-      .o_branch_instr (                 )
+      .o_branch_instr (                 ),
+      .o_bp_index     ( bp_index        ),
+      .i_upd_valid    ( bp_upd_valid    ),
+      .i_upd_taken    ( bp_upd_taken    ),
+      .i_upd_index    ( predicted_index_reg )
     );
   end else begin
     always_comb begin
       predicted_pc = 32'b0;
     end
+    assign bp_index = '0;
   end
 
   // select the fetch address
@@ -266,16 +300,33 @@ module cpu_fetch
   end
 
   //! instruction fetch from imem
-  always_ff @(posedge i_clk) begin: fetch
-    ibus_rd_en   <= i_en_fetch | bad_predict;
-    ibus_wr_data <= 32'd0;
-    ibus_wr_en   <= 1'b0;
-    ibus_be      <= 4'b0000;
-    if (i_en_fetch || bad_predict) begin
-      if (i_offset_pc) begin
-        ibus_addr  <= (fetch_addr + 2) & ~p_reset_vector;
-      end else begin
-        ibus_addr  <= fetch_addr & ~p_reset_vector;
+  if (p_overlap) begin: gen_fetch_comb
+    //! `p_overlap`: the bus request is driven combinationally instead of being
+    //! registered, so the instruction word comes back one cycle after the fetch
+    //! is enabled instead of two. This is what lets `cpu_fsm` drop the write
+    //! back state from the straight line loop. The price is that the whole
+    //! `imem read data -> decompress -> decode -> next pc` chain now stands in
+    //! front of the instruction memory address input: a pure IPC for Fmax
+    //! trade-off.
+    always_comb begin: fetch
+      ibus_rd_en   = i_en_fetch | bad_predict;
+      ibus_wr_data = 32'd0;
+      ibus_wr_en   = 1'b0;
+      ibus_be      = 4'b0000;
+      ibus_addr    = (i_offset_pc ? (fetch_addr + 2) : fetch_addr) & ~p_reset_vector;
+    end
+  end else begin: gen_fetch_reg
+    always_ff @(posedge i_clk) begin: fetch
+      ibus_rd_en   <= i_en_fetch | bad_predict;
+      ibus_wr_data <= 32'd0;
+      ibus_wr_en   <= 1'b0;
+      ibus_be      <= 4'b0000;
+      if (i_en_fetch || bad_predict) begin
+        if (i_offset_pc) begin
+          ibus_addr  <= (fetch_addr + 2) & ~p_reset_vector;
+        end else begin
+          ibus_addr  <= fetch_addr & ~p_reset_vector;
+        end
       end
     end
   end
@@ -301,9 +352,12 @@ module cpu_fetch
 
   // assign outputs
   assign o_instr.code    = instr;
-  assign o_pc            = pc_reg_out;
-  assign o_pc_inc        = pc_inc_reg_out;
-  assign o_minstret      = p_counters ? minstret_reg_out : 64'b0;
+  //! `pc`, `pc_inc` and `minstret` are held one cycle behind so that they line
+  //! up with the state that consumes them. With overlap that state is the cycle
+  //! in which they are produced, so the delay is removed.
+  assign o_pc            = p_overlap ? pc     : pc_reg_out;
+  assign o_pc_inc        = p_overlap ? pc_inc : pc_inc_reg_out;
+  assign o_minstret      = !p_counters ? 64'b0 : (p_overlap ? minstret : minstret_reg_out);
   assign o_bad_predict   = bad_predict;
   assign o_bypass_decomp = bypass_decomp;
   assign o_half_npc_addr = half_npc_addr;

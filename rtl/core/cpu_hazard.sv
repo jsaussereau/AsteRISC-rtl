@@ -158,8 +158,9 @@ module cpu_hazard
   parameter p_stage_WB     = 1,           //! number of write back barriers
   parameter p_early_jal    = 1,           //! resolve `jal` from the decoder instead of the RF slot
   //! branch prediction scheme (shared with the multi-cycle core):
-  //!   0 = off, 1 = static (backward taken / forward not taken).
-  //! Higher values are reserved for the dynamic predictors to come.
+  //!   0 = off, 1 = static (backward taken / forward not taken),
+  //!   2 = dynamic (saturating counters, optionally gshare -- see
+  //!       `cpu_dynamic_branch_predictor` and the `p_bp_*` parameters).
   parameter p_branch_pred  = 0,           //! branch prediction scheme
   parameter p_redirect_buf = 1,           //! register the redirection target before the fetch stage
   //! slot at which a resolved control transfer is acted upon:

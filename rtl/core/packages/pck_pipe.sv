@@ -145,6 +145,10 @@ package pck_pipe;
                       Stage bundles
   *****************************************************/
 
+  //! widest dynamic predictor index a payload can carry. It bounds
+  //! `p_bp_index_bits`: a bigger table would need this constant raised.
+  localparam int BP_IDX_MAX = 12;
+
   //! payload of the ID and RF stage barriers
   typedef struct packed {
     pipe_com_t    com;
@@ -156,6 +160,12 @@ package pck_pipe;
     logic         cond_branch;            //! conditionnal branch (ID only)
     logic         jump_reg;               //! jump register (ID only)
     logic         predicted;              //! predicted taken by the front-end (ID only)
+    //! index the dynamic predictor used for that prediction, carried down to
+    //! the slot that resolves the branch so that the counter updated is the one
+    //! that was read -- with a global history it cannot be recomputed there,
+    //! the history has moved on. Unused bits (and the whole field when
+    //! prediction is off or static) are tied to zero and trimmed by synthesis.
+    logic [BP_IDX_MAX-1:0] bp_index;      //! dynamic predictor index (ID only)
   } pipe_id_t;
 
   //! payload of the EX stage barrier
@@ -240,7 +250,8 @@ package pck_pipe;
   localparam pipe_id_t  PIPE_ID_NOP  = '{
     com: PIPE_COM_NOP, rs: PIPE_RS_NOP, wbc: PIPE_WBC_NOP,
     dec: PIPE_DEC_NOP, mem: PIPE_MEM_NOP,
-    sel_br: br_none, cond_branch: 1'b0, jump_reg: 1'b0, predicted: 1'b0
+    sel_br: br_none, cond_branch: 1'b0, jump_reg: 1'b0, predicted: 1'b0,
+    bp_index: '0
   };
 
   localparam pipe_ex_t  PIPE_EX_NOP  = '{

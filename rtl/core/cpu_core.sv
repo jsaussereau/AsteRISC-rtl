@@ -61,9 +61,13 @@ module cpu_core
   parameter p_alu_shift_bits  = 32,       //! bits shifted per cycle: 32 = barrel shifter, 1/2/4/8/16 = sequential
 
   //! branch prediction scheme (shared with the multi-cycle core):
-  //!   0 = off, 1 = static (backward taken / forward not taken).
-  //! Higher values are reserved for the dynamic predictors to come.
+  //!   0 = off, 1 = static (backward taken / forward not taken),
+  //!   2 = dynamic (saturating counters, optionally gshare -- see
+  //!       `cpu_dynamic_branch_predictor` and the `p_bp_*` parameters).
   parameter p_branch_pred  = 0,           //! branch prediction scheme
+  parameter p_bp_index_bits = 5,          //! dynamic prediction: log2 of the number of counters
+  parameter p_bp_ctr_bits   = 2,          //! dynamic prediction: width of a saturating counter
+  parameter p_bp_ghr_bits   = 0,          //! dynamic prediction: global history bits (0 = bimodal)
 
   // non pipeline settings:
   parameter p_fetch_buf    = 0,           //! add buffers to fetch stage output
@@ -371,6 +375,9 @@ module cpu_core
   cpu_fetch #(
     .p_reset_vector ( p_reset_vector  ),
     .p_branch_pred  ( p_branch_pred   ),
+    .p_bp_index_bits( p_bp_index_bits ),
+    .p_bp_ctr_bits  ( p_bp_ctr_bits   ),
+    .p_bp_ghr_bits  ( p_bp_ghr_bits   ),
     .p_fetch_buf    ( p_fetch_buf     ),
     .p_branch_buf   ( p_branch_buf    ),
     .p_counters     ( p_counters      )

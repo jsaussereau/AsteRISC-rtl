@@ -37,7 +37,7 @@ module cpu_fsm
 #(
   parameter p_rf_sp        = 0,       //! register file is a single port ram
   parameter p_rf_read_buf  = 0,       //! register file has synchronous read
-  parameter p_branch_pred  = 0,       //! branch prediction scheme (0 = off, 1 = static)
+  parameter p_branch_pred  = 0,       //! branch prediction scheme (0 = off, 1 = static, 2 = dynamic)
   parameter p_fetch_buf    = 0,       //! add buffers to fetch stage output
   parameter p_decode_buf   = 0,       //! add buffers to decode stage outputs
   parameter p_mem_buf      = 0,       //! add buffers to mem stage inputs
@@ -126,10 +126,12 @@ module cpu_fsm
 
   logic [ 7: 0] state_counter;
 
-  localparam logic static_branch_pred = (p_branch_pred == 1);
-  wire speculative_cond_branch = static_branch_pred && p_branch_buf && i_cond_branch;
+  //! the sequencing is the same whatever the scheme predicts: a conditionnal
+  //! branch is speculated instead of being waited for
+  localparam logic branch_pred_on = (p_branch_pred != 0);
+  wire speculative_cond_branch = branch_pred_on && p_branch_buf && i_cond_branch;
   wire wait_for_branch_result = p_branch_buf &&
-                                (i_jump_reg || (i_cond_branch && !static_branch_pred));
+                                (i_jump_reg || (i_cond_branch && !branch_pred_on));
 
   //! determine mealy machine outputs
   always_comb begin

@@ -96,9 +96,13 @@ module cpu_core_pipe
   parameter p_fwd_pw       = 1,           //! bypass from the pending register file write
 
   //! branch prediction scheme (shared with the multi-cycle core):
-  //!   0 = off, 1 = static (backward taken / forward not taken).
-  //! Higher values are reserved for the dynamic predictors to come.
+  //!   0 = off, 1 = static (backward taken / forward not taken),
+  //!   2 = dynamic (saturating counters, optionally gshare -- see
+  //!       `cpu_dynamic_branch_predictor` and the `p_bp_*` parameters).
   parameter p_branch_pred  = 0,           //! branch prediction scheme
+  parameter p_bp_index_bits = 5,          //! dynamic prediction: log2 of the number of counters
+  parameter p_bp_ctr_bits   = 2,          //! dynamic prediction: width of a saturating counter
+  parameter p_bp_ghr_bits   = 0,          //! dynamic prediction: global history bits (0 = bimodal)
 
   // non pipeline settings:
   parameter p_fetch_buf    = 0,           //! add buffers to fetch stage output
@@ -401,6 +405,10 @@ module cpu_core_pipe
   logic         swap_bytes;               //!
   sel_wb_e      sel_wb;                   //! write back source selector
   logic         en_wb;                    //! register file write enable
+  //! the index is a real bus only for the dynamic scheme; elsewhere it is a
+  //! single constant bit that synthesis removes
+  localparam int BP_IDX_W = (p_branch_pred >= 2) ? p_bp_index_bits : 1;
+
   logic         cond_branch;              //! conditionnal branch
   wire  [31: 0] imm_bp;                   //! immediate value (unregistered)
   wire          br_instr_bp;              //! conditionnal branch (inconditionnal branches jal and jalr are excluded) (unregistered)
@@ -409,6 +417,10 @@ module cpu_core_pipe
   wire          predict_taken;            //! the IC slot instruction is predicted taken (unregistered)
   wire          predict_IC;               //! prediction offered to the hazard unit
   wire          predicted_RF;             //! the RF slot instruction was predicted taken
+  wire  [BP_IDX_W-1:0] bp_index_IC;       //! predictor index of the IC slot lookup
+  wire  [BP_IDX_W-1:0] bp_index_RF;       //! ...as carried down to the resolving slot
+  wire          bp_upd_valid;             //! a conditionnal branch resolves this cycle
+  wire          bp_upd_taken;             //! ...and this is its actual outcome
   logic         jump_reg;                 //! jump register
   logic [31: 0] csr_rd_data;
 
@@ -960,10 +972,46 @@ module cpu_core_pipe
         .o_predicted_pc (                       ),
         .o_predict_taken( predict_taken         )
       );
+      assign bp_index_IC = '0;
+    end else if (p_branch_pred >= 2) begin : g_branch_pred  // dynamic prediction
+      //! same slot, same target computation: only the *direction* of a
+      //! conditionnal branch now comes from a table of saturating counters
+      //! instead of the sign of the immediate. The table is read here and
+      //! written back at the RF slot, where the execute unit produces the
+      //! verdict; nothing in between has to know about it beyond carrying the
+      //! index along with the instruction.
+      cpu_dynamic_branch_predictor #(
+        .p_bp_index_bits( BP_IDX_W              ),
+        .p_bp_ctr_bits  ( p_bp_ctr_bits         ),
+        .p_bp_ghr_bits  ( p_bp_ghr_bits         )
+      ) branch_predictor (
+        .i_clk          ( i_clk                 ),
+        .i_rst          ( i_rst                 ),
+        .i_cond_branch  ( cond_br_bp            ),
+        .i_branch_instr ( br_instr_bp           ),
+        .i_jalr_instr   ( jalr_instr_bp         ),
+        .i_imm          ( imm_bp                ),
+        .i_pc           ( pc_IC                 ),
+        .i_pc_inc       ( pc_inc_IC             ),
+        .o_predicted_pc (                       ),
+        .o_predict_taken( predict_taken         ),
+        .o_index        ( bp_index_IC           ),
+        .i_upd_valid    ( bp_upd_valid          ),
+        .i_upd_taken    ( bp_upd_taken          ),
+        .i_upd_index    ( bp_index_RF           )
+      );
     end else begin : g_branch_pred
       assign predict_taken = 1'b0;
+      assign bp_index_IC   = '0;
     end
   endgenerate
+
+  //! the outcome the predictor learns from. Only conditionnal branches teach it
+  //! anything, and each of them exactly once: the RF slot holds an instruction
+  //! for as long as it is frozen, and `en_RF` is the cycle it moves on.
+  assign bp_index_RF  = ctrl_RF.bp_index[BP_IDX_W-1:0];
+  assign bp_upd_valid = (p_branch_pred >= 2) & valid_RF & en_RF & ctrl_RF.cond_branch;
+  assign bp_upd_taken = branch_taken;
 
   assign predict_IC   = predict_taken;
   assign predicted_RF = ctrl_RF.predicted;
@@ -1016,6 +1064,8 @@ module cpu_core_pipe
     ctrl_ID_n.cond_branch      = cond_branch;
     ctrl_ID_n.jump_reg         = jump_reg;
     ctrl_ID_n.predicted        = predict_IC;
+    ctrl_ID_n.bp_index         = '0;
+    ctrl_ID_n.bp_index[BP_IDX_W-1:0] = bp_index_IC;
   end
 
   generate

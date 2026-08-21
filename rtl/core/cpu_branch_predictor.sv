@@ -43,7 +43,13 @@ module cpu_branch_predictor
 #(
   parameter p_reset_vector = 32'hf0000000,
   parameter p_branch_buf   = 0,           //! add buffers to alu comp outputs (+1 cycle for conditionnal branches)
-  parameter p_mini_decoder = 0            //! use a mini decoder for branch prediction
+  parameter p_mini_decoder = 0,           //! use a mini decoder for branch prediction
+  //! prediction scheme: 1 = static (backward taken / forward not taken),
+  //! 2 = dynamic (saturating counters, see `cpu_dynamic_branch_predictor`)
+  parameter p_branch_pred  = 1,           //! branch prediction scheme
+  parameter p_bp_index_bits = 5,          //! dynamic: log2 of the number of counters
+  parameter p_bp_ctr_bits   = 2,          //! dynamic: width of a saturating counter
+  parameter p_bp_ghr_bits   = 0           //! dynamic: global history bits (0 = bimodal)
 )(
   input  wire          i_clk,             //! global clock
   input  wire          i_rst,             //! global reset
@@ -58,7 +64,13 @@ module cpu_branch_predictor
   input  wire  [31: 0] i_imm_bp,          //! immediate value (unregistered)
   output wire  [31: 0] o_predicted_pc,    //! predicted pc value
   output wire          o_predict_taken,   //! the control transfer is predicted taken
-  output wire          o_branch_instr     //! branch instruction
+  output wire          o_branch_instr,    //! branch instruction
+  output wire  [p_bp_index_bits-1:0] o_bp_index, //! dynamic: table index used for this prediction
+
+  // dynamic predictor update, when a conditionnal branch resolves
+  input  wire          i_upd_valid,       //! a conditionnal branch resolved this cycle
+  input  wire          i_upd_taken,       //! ...and this is its actual outcome
+  input  wire  [p_bp_index_bits-1:0] i_upd_index //! the index it was predicted with
 );
   
   logic         bad_predict;
@@ -75,6 +87,8 @@ module cpu_branch_predictor
 
   instr_type_e  instr_type;
   logic [31: 0] imm;
+
+  wire  [p_bp_index_bits-1:0] bp_index;
 
   always_comb begin
     instr_type = instr_r;
@@ -126,20 +140,49 @@ module cpu_branch_predictor
   assign jalr_instr_bp = p_mini_decoder ? jalr_instr : i_jalr_instr_bp;
   assign imm_bp        = p_mini_decoder ? imm        : i_imm_bp;
 
-  cpu_static_branch_predictor branch_predictor (
-    .i_cond_branch  ( cond_br_bp    ),
-    .i_branch_instr ( br_instr_bp   ),
-    .i_jalr_instr   ( jalr_instr_bp ),
-    .i_imm          ( imm_bp        ),
-    .i_pc           ( i_pc          ),
-    .i_pc_inc       ( i_pc_inc      ),
-    .o_predicted_pc ( predicted_pc  ),
-    .o_predict_taken( predict_taken )
-  );
+  //! the two schemes share their whole interface but the update port and the
+  //! index handed out with a prediction, so only the selected one is built
+  generate
+    if (p_branch_pred >= 2) begin: g_scheme
+      cpu_dynamic_branch_predictor #(
+        .p_bp_index_bits( p_bp_index_bits ),
+        .p_bp_ctr_bits  ( p_bp_ctr_bits   ),
+        .p_bp_ghr_bits  ( p_bp_ghr_bits   )
+      ) branch_predictor (
+        .i_clk          ( i_clk         ),
+        .i_rst          ( i_rst         ),
+        .i_cond_branch  ( cond_br_bp    ),
+        .i_branch_instr ( br_instr_bp   ),
+        .i_jalr_instr   ( jalr_instr_bp ),
+        .i_imm          ( imm_bp        ),
+        .i_pc           ( i_pc          ),
+        .i_pc_inc       ( i_pc_inc      ),
+        .o_predicted_pc ( predicted_pc  ),
+        .o_predict_taken( predict_taken ),
+        .o_index        ( bp_index      ),
+        .i_upd_valid    ( i_upd_valid   ),
+        .i_upd_taken    ( i_upd_taken   ),
+        .i_upd_index    ( i_upd_index   )
+      );
+    end else begin: g_scheme
+      cpu_static_branch_predictor branch_predictor (
+        .i_cond_branch  ( cond_br_bp    ),
+        .i_branch_instr ( br_instr_bp   ),
+        .i_jalr_instr   ( jalr_instr_bp ),
+        .i_imm          ( imm_bp        ),
+        .i_pc           ( i_pc          ),
+        .i_pc_inc       ( i_pc_inc      ),
+        .o_predicted_pc ( predicted_pc  ),
+        .o_predict_taken( predict_taken )
+      );
+      assign bp_index = '0;
+    end
+  endgenerate
   
   assign o_predicted_pc  = predicted_pc;
   assign o_predict_taken = predict_taken;
   assign o_branch_instr = p_mini_decoder ? br_instr : i_br_instr_bp;
+  assign o_bp_index      = bp_index;
 
 endmodule
 
